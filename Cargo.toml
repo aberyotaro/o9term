@@ -1,0 +1,10 @@
+[package]
+name = "os9terminal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+fontdue = "0.9.3"
+softbuffer = "0.4.8"
+winit = "0.30.13"
