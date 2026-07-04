@@ -35,11 +35,66 @@ fn main() {
 }
 
 /// スプリッターのドラッグ中の状態。
-struct DragState {
+struct SplitterDrag {
     index: usize,
     dir: SplitDir,
     track: Rect,
     sw: i32,
+}
+
+/// タブのドラッグ中の状態。
+struct TabDrag {
+    /// ドラッグ中のタブ (tabs のインデックス)
+    tab_index: usize,
+    /// マウスを押した位置。閾値を超えて動くまではクリック扱い
+    press_pos: (f64, f64),
+    started: bool,
+    target: Option<DropTarget>,
+}
+
+/// タブのドロップ先。
+#[derive(Copy, Clone, PartialEq)]
+enum DropTarget {
+    /// タブバー内の並べ替え (挿入位置)
+    TabBar(usize),
+    /// ペインの上下左右へのドッキング
+    Dock { pane: PaneId, side: Side },
+}
+
+#[derive(Copy, Clone, PartialEq)]
+enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Side {
+    /// ドッキング時の分割方向と挿入順 (true = 前側 = 左/上)。
+    fn split(self) -> (SplitDir, bool) {
+        match self {
+            Side::Left => (SplitDir::Vertical, true),
+            Side::Right => (SplitDir::Vertical, false),
+            Side::Top => (SplitDir::Horizontal, true),
+            Side::Bottom => (SplitDir::Horizontal, false),
+        }
+    }
+
+    /// ペイン矩形のうち、ドロップ後に占める半分の領域 (プレビュー用)。
+    fn preview(self, r: Rect) -> Rect {
+        match self {
+            Side::Left => Rect { x: r.x, y: r.y, w: r.w / 2, h: r.h },
+            Side::Right => Rect { x: r.x + r.w / 2, y: r.y, w: r.w - r.w / 2, h: r.h },
+            Side::Top => Rect { x: r.x, y: r.y, w: r.w, h: r.h / 2 },
+            Side::Bottom => Rect { x: r.x, y: r.y + r.h / 2, w: r.w, h: r.h - r.h / 2 },
+        }
+    }
+}
+
+/// マウスドラッグの種別。
+enum MouseDrag {
+    Splitter(SplitterDrag),
+    Tab(TabDrag),
 }
 
 struct App {
@@ -57,7 +112,7 @@ struct App {
     splitter_hits: Vec<SplitterHit>,
     tab_hits: Vec<Rect>,
     plus_hit: Option<Rect>,
-    drag: Option<DragState>,
+    drag: Option<MouseDrag>,
     modifiers: ModifiersState,
     cursor_pos: (f64, f64),
     focused: bool,
@@ -245,6 +300,49 @@ impl App {
             renderer.draw_splitter(&mut buffer, size.width, size.height, sh);
         }
         renderer.draw_grow_box(&mut buffer, size.width, size.height, self.layout.grow_box);
+
+        // タブドラッグ中の視覚フィードバック (最前面)
+        if let Some(MouseDrag::Tab(td)) = &self.drag {
+            if td.started {
+                match td.target {
+                    Some(DropTarget::Dock { pane, side }) => {
+                        if let Some((_, r)) = self.pane_hits.iter().find(|(id, _)| *id == pane) {
+                            renderer.draw_drop_outline(
+                                &mut buffer,
+                                size.width,
+                                size.height,
+                                side.preview(*r),
+                            );
+                        }
+                    }
+                    Some(DropTarget::TabBar(pos)) => {
+                        if let Some(bar) = self.layout.tab_bar {
+                            let s = |v: f64| ((v * renderer.scale).round() as i32).max(1);
+                            let x = match self.tab_hits.get(pos) {
+                                Some(r) => r.x - s(2.0),
+                                None => {
+                                    self.tab_hits.last().map(|r| r.right() + s(1.0)).unwrap_or(bar.x)
+                                }
+                            };
+                            let bar_rect = Rect {
+                                x,
+                                y: bar.y + s(2.0),
+                                w: s(2.0),
+                                h: bar.h - s(4.0),
+                            };
+                            renderer.draw_drop_bar(&mut buffer, size.width, size.height, bar_rect);
+                        }
+                    }
+                    None => {}
+                }
+                // ドラッグ中のタブのゴースト枠 (カーソル追従)
+                if let Some(r) = self.tab_hits.get(td.tab_index) {
+                    let (cx, cy) = (self.cursor_pos.0 as i32, self.cursor_pos.1 as i32);
+                    let ghost = Rect { x: cx - r.w / 2, y: cy - r.h / 2, w: r.w, h: r.h };
+                    renderer.draw_drop_outline(&mut buffer, size.width, size.height, ghost);
+                }
+            }
+        }
 
         let _ = buffer.present();
     }
@@ -474,7 +572,13 @@ impl App {
             return;
         }
         if let Some(i) = self.tab_hits.iter().position(|r| r.contains(x, y)) {
-            self.select_tab(i);
+            // タブ選択は離した時に確定する (ドラッグと区別するため)
+            self.drag = Some(MouseDrag::Tab(TabDrag {
+                tab_index: i,
+                press_pos: (x, y),
+                started: false,
+                target: None,
+            }));
             return;
         }
         if self.plus_hit.is_some_and(|r| r.contains(x, y)) {
@@ -482,12 +586,12 @@ impl App {
             return;
         }
         if let Some(sh) = self.splitter_hits.iter().find(|sh| sh.rect.contains(x, y)) {
-            self.drag = Some(DragState {
+            self.drag = Some(MouseDrag::Splitter(SplitterDrag {
                 index: sh.index,
                 dir: sh.dir,
                 track: sh.track,
                 sw: self.splitter_width(),
-            });
+            }));
             return;
         }
         if self.layout.grow_box.contains(x, y) {
@@ -509,8 +613,8 @@ impl App {
         }
     }
 
-    fn handle_drag(&mut self) {
-        let Some(drag) = &self.drag else { return };
+    fn handle_splitter_drag(&mut self) {
+        let Some(MouseDrag::Splitter(drag)) = &self.drag else { return };
         let (x, y) = self.cursor_pos;
         let (pos, start, len) = match drag.dir {
             SplitDir::Vertical => (x, drag.track.x, drag.track.w - drag.sw),
@@ -528,6 +632,123 @@ impl App {
         self.update_layout();
         self.sync_pane_sizes();
         self.redraw();
+    }
+
+    /// タブドラッグ中のカーソル移動。閾値を超えたらドラッグ開始し、
+    /// ドロップ先を再計算する。
+    fn handle_tab_drag(&mut self) {
+        let scale = self.renderer.as_ref().map(|r| r.scale).unwrap_or(1.0);
+        let threshold = 4.0 * scale;
+        let Some(MouseDrag::Tab(td)) = &self.drag else { return };
+
+        let (x, y) = self.cursor_pos;
+        let (px, py) = td.press_pos;
+        let started = td.started || (x - px).abs() > threshold || (y - py).abs() > threshold;
+        if !started {
+            return;
+        }
+        let target = self.compute_drop_target(td.tab_index);
+
+        if let Some(MouseDrag::Tab(td)) = &mut self.drag {
+            td.started = true;
+            td.target = target;
+        }
+        self.redraw();
+    }
+
+    /// カーソル位置からタブのドロップ先を決める。
+    fn compute_drop_target(&self, dragging: usize) -> Option<DropTarget> {
+        let (x, y) = self.cursor_pos;
+
+        // タブバー内: 並べ替え。挿入位置は各タブの中心との比較で決める
+        if self.layout.tab_bar.is_some_and(|bar| bar.contains(x, y)) {
+            let mut pos = self.tab_hits.len();
+            for (i, r) in self.tab_hits.iter().enumerate() {
+                if x < (r.x + r.w / 2) as f64 {
+                    pos = i;
+                    break;
+                }
+            }
+            return Some(DropTarget::TabBar(pos));
+        }
+
+        // ペイン上: 上下左右のうち最も近い辺へドッキング。
+        // アクティブタブ自身は自分の中にドックできない
+        if dragging != self.active_tab {
+            if let Some((id, rect)) = self.pane_hits.iter().find(|(_, r)| r.contains(x, y)) {
+                let nx = (x - rect.x as f64) / rect.w.max(1) as f64;
+                let ny = (y - rect.y as f64) / rect.h.max(1) as f64;
+                let side = [
+                    (nx, Side::Left),
+                    (1.0 - nx, Side::Right),
+                    (ny, Side::Top),
+                    (1.0 - ny, Side::Bottom),
+                ]
+                .into_iter()
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, s)| s)?;
+                return Some(DropTarget::Dock { pane: *id, side });
+            }
+        }
+        None
+    }
+
+    /// タブドラッグの終了 (マウスリリース)。
+    fn finish_tab_drag(&mut self, td: TabDrag) {
+        if !td.started {
+            // 動かさず離した = ただのクリック
+            self.select_tab(td.tab_index);
+            return;
+        }
+        match td.target {
+            Some(DropTarget::TabBar(pos)) => self.reorder_tab(td.tab_index, pos),
+            Some(DropTarget::Dock { pane, side }) => self.dock_tab(td.tab_index, pane, side),
+            None => {}
+        }
+        self.redraw();
+    }
+
+    /// タブを並べ替える。`to` は元の並びでの挿入位置。
+    fn reorder_tab(&mut self, from: usize, to: usize) {
+        if from >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        // 取り除いた後の並びでの挿入位置に補正
+        let to = if to > from { to - 1 } else { to }.min(self.tabs.len());
+        self.tabs.insert(to, tab);
+
+        let a = self.active_tab;
+        self.active_tab = if a == from {
+            to
+        } else {
+            let shifted = if from < a { a - 1 } else { a };
+            if to <= shifted { shifted + 1 } else { shifted }
+        };
+        self.refresh();
+    }
+
+    /// タブを (中のペイン構成ごと) アクティブタブのペインへドッキングする。
+    fn dock_tab(&mut self, from: usize, target_pane: PaneId, side: Side) {
+        if from == self.active_tab || from >= self.tabs.len() {
+            return;
+        }
+        if !self.tabs[self.active_tab].root.contains(target_pane) {
+            return;
+        }
+        let dragged = self.tabs.remove(from);
+        if from < self.active_tab {
+            self.active_tab -= 1;
+        }
+        let focused = dragged.focused;
+        let (dir, before) = side.split();
+        let mut carrier = Some(dragged.root);
+        let tab = &mut self.tabs[self.active_tab];
+        if tab.root.dock_subtree(target_pane, dir, before, &mut carrier) {
+            // フォーカスは動かしてきたペインへ
+            tab.focused = focused;
+        }
+        self.refresh();
     }
 }
 
@@ -623,8 +844,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
-                if self.drag.is_some() {
-                    self.handle_drag();
+                match &self.drag {
+                    Some(MouseDrag::Splitter(_)) => self.handle_splitter_drag(),
+                    Some(MouseDrag::Tab(_)) => self.handle_tab_drag(),
+                    None => {}
                 }
             }
             WindowEvent::MouseInput {
@@ -635,7 +858,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput {
                 state: ElementState::Released, button: MouseButton::Left, ..
             } => {
-                self.drag = None;
+                if let Some(drag) = self.drag.take() {
+                    if let MouseDrag::Tab(td) = drag {
+                        self.finish_tab_drag(td);
+                    }
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {

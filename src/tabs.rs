@@ -126,6 +126,36 @@ impl PaneNode {
         }
     }
 
+    /// `target` の葉を `dir` で分割し、`subtree` を `before` に応じて
+    /// 前側 (左/上) または後側 (右/下) に挿入する。タブのドックに使う。
+    pub fn dock_subtree(
+        &mut self,
+        target: PaneId,
+        dir: SplitDir,
+        before: bool,
+        subtree: &mut Option<PaneNode>,
+    ) -> bool {
+        match self {
+            PaneNode::Leaf(pane) if pane.id == target => {
+                let Some(sub) = subtree.take() else { return false };
+                let old = std::mem::replace(self, PaneNode::Empty);
+                let (first, second) = if before { (sub, old) } else { (old, sub) };
+                *self = PaneNode::Split {
+                    dir,
+                    ratio: 0.5,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                };
+                true
+            }
+            PaneNode::Split { first, second, .. } => {
+                first.dock_subtree(target, dir, before, subtree)
+                    || second.dock_subtree(target, dir, before, subtree)
+            }
+            _ => false,
+        }
+    }
+
     /// `id` の葉を取り除き、親の分割ノードをもう片方の子で置き換える。
     /// ルートが対象の葉そのものである場合は呼び出し側でタブごと閉じること。
     pub fn remove_pane(&mut self, id: PaneId) -> bool {

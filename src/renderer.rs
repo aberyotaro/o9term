@@ -427,6 +427,19 @@ impl Renderer {
         }
     }
 
+    /// タブドラッグ中のドロップ先プレビュー枠。
+    pub fn draw_drop_outline(&self, buf: &mut [u32], width: u32, height: u32, r: Rect) {
+        let (w, h) = (width as i32, height as i32);
+        let t = ((2.0 * self.scale).round() as i32).max(2);
+        stroke_rect(buf, w, h, r.x, r.y, r.w, r.h, t, theme::DROP_HINT);
+    }
+
+    /// タブ並べ替え時の挿入位置バー。
+    pub fn draw_drop_bar(&self, buf: &mut [u32], width: u32, height: u32, r: Rect) {
+        let (w, h) = (width as i32, height as i32);
+        fill_rect(buf, w, h, r.x, r.y, r.w, r.h, theme::DROP_HINT);
+    }
+
     pub fn draw_grow_box(&self, buf: &mut [u32], width: u32, height: u32, r: Rect) {
         let (w, h) = (width as i32, height as i32);
         let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
