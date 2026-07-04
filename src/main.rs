@@ -1,6 +1,7 @@
 //! 0s9terminal — Mac OS 9 (Platinum) 風ターミナルエミュレータ。
 //! ウィンドウ装飾は OS 標準を使わず、タイトルバーごと自前で描画する。
 
+mod config;
 mod renderer;
 mod tabs;
 mod term;
@@ -97,6 +98,17 @@ enum MouseDrag {
     Tab(TabDrag),
 }
 
+/// 設定ウィンドウ (カラースキーマ選択) の状態。
+struct SettingsState {
+    window: Rc<Window>,
+    _context: softbuffer::Context<Rc<Window>>,
+    surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+    layout: Layout,
+    row_hits: Vec<Rect>,
+    cursor: (f64, f64),
+    focused: bool,
+}
+
 struct App {
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Rc<Window>>,
@@ -116,6 +128,8 @@ struct App {
     modifiers: ModifiersState,
     cursor_pos: (f64, f64),
     focused: bool,
+    scheme_index: usize,
+    settings: Option<SettingsState>,
 }
 
 impl App {
@@ -138,6 +152,8 @@ impl App {
             modifiers: ModifiersState::default(),
             cursor_pos: (0.0, 0.0),
             focused: true,
+            scheme_index: theme::scheme_index(&config::load_scheme().unwrap_or_default()),
+            settings: None,
         }
     }
 
@@ -289,11 +305,20 @@ impl App {
             self.focused,
         );
 
+        let scheme = &theme::SCHEMES[self.scheme_index];
         for (id, rect) in &self.pane_hits {
             if let Some(pane) = tab.root.find_pane(*id) {
                 let term = pane.terminal.term.lock();
                 let active = self.focused && tab.focused == *id;
-                renderer.draw_pane(&mut buffer, size.width, size.height, *rect, &term, active);
+                renderer.draw_pane(
+                    &mut buffer,
+                    size.width,
+                    size.height,
+                    *rect,
+                    &term,
+                    active,
+                    scheme,
+                );
             }
         }
         for sh in &self.splitter_hits {
@@ -458,6 +483,131 @@ impl App {
         }
     }
 
+    // ─── 設定ウィンドウ ───
+
+    fn toggle_settings(&mut self, event_loop: &ActiveEventLoop) {
+        if self.settings.is_some() {
+            self.settings = None;
+            return;
+        }
+        let attrs = Window::default_attributes()
+            .with_title("設定")
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_inner_size(LogicalSize::new(300.0, 200.0));
+        let Ok(window) = event_loop.create_window(attrs) else { return };
+        let window = Rc::new(window);
+        let Ok(context) = softbuffer::Context::new(window.clone()) else { return };
+        let Ok(surface) = softbuffer::Surface::new(&context, window.clone()) else { return };
+        window.request_redraw();
+        self.settings = Some(SettingsState {
+            window,
+            _context: context,
+            surface,
+            layout: Layout::default(),
+            row_hits: Vec::new(),
+            cursor: (0.0, 0.0),
+            focused: true,
+        });
+    }
+
+    fn render_settings(&mut self) {
+        let (Some(st), Some(renderer)) = (self.settings.as_mut(), self.renderer.as_mut()) else {
+            return;
+        };
+        let size = st.window.inner_size();
+        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+        else {
+            return;
+        };
+        if st.surface.resize(w, h).is_err() {
+            return;
+        }
+        let Ok(mut buffer) = st.surface.buffer_mut() else { return };
+
+        let layout = Layout::compute(size.width, size.height, renderer.scale, false);
+        renderer.draw_chrome(
+            &mut buffer,
+            size.width,
+            size.height,
+            &layout,
+            "設定",
+            &[],
+            st.focused,
+        );
+        let hits =
+            renderer.draw_settings(&mut buffer, size.width, size.height, &layout, self.scheme_index);
+        st.layout = layout;
+        st.row_hits = hits;
+        let _ = buffer.present();
+    }
+
+    /// スキーマを切り替えて保存し、両ウィンドウを再描画する。
+    fn apply_scheme(&mut self, index: usize) {
+        if index >= theme::SCHEMES.len() || index == self.scheme_index {
+            return;
+        }
+        self.scheme_index = index;
+        config::save_scheme(theme::SCHEMES[index].id);
+        self.redraw();
+        if let Some(st) = &self.settings {
+            st.window.request_redraw();
+        }
+    }
+
+    fn handle_settings_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => self.settings = None,
+            WindowEvent::RedrawRequested => self.render_settings(),
+            WindowEvent::Focused(focused) => {
+                if let Some(st) = &mut self.settings {
+                    st.focused = focused;
+                    st.window.request_redraw();
+                }
+            }
+            WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(st) = &mut self.settings {
+                    st.cursor = (position.x, position.y);
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed, button: MouseButton::Left, ..
+            } => {
+                let Some(st) = &self.settings else { return };
+                let (x, y) = st.cursor;
+                if st.layout.close_box.contains(x, y) {
+                    self.settings = None;
+                } else if st.layout.collapse_box.contains(x, y) {
+                    st.window.set_minimized(true);
+                } else if let Some(i) = st.row_hits.iter().position(|r| r.contains(x, y)) {
+                    self.apply_scheme(i);
+                } else if st.layout.titlebar.contains(x, y) {
+                    let _ = st.window.drag_window();
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state != ElementState::Pressed {
+                    return;
+                }
+                let close = matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                    || (self.modifiers.super_key()
+                        && matches!(&event.logical_key, Key::Character(s) if s.as_str() == "w" || s.as_str() == ","));
+                if close {
+                    self.settings = None;
+                } else if self.modifiers.super_key() {
+                    if let Key::Character(s) = &event.logical_key {
+                        if s.as_str() == "q" {
+                            self.tabs.clear();
+                            event_loop.exit();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     // ─── 入力 ───
 
     fn handle_key(&mut self, event: KeyEvent, event_loop: &ActiveEventLoop) {
@@ -543,6 +693,7 @@ impl App {
             "w" => self.close_active_tab(event_loop),
             "d" if shift => self.split(SplitDir::Horizontal),
             "d" => self.split(SplitDir::Vertical),
+            "," => self.toggle_settings(event_loop),
             "{" => self.cycle_tab(-1),
             "}" => self.cycle_tab(1),
             d @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9") => {
@@ -824,9 +975,14 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
+        // 設定ウィンドウ宛のイベントは専用ハンドラへ
+        if self.settings.as_ref().is_some_and(|st| st.window.id() == window_id) {
+            self.handle_settings_event(event_loop, event);
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.tabs.clear();

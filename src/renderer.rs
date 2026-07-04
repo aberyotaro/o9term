@@ -11,10 +11,12 @@ use fontdue::{Font, FontSettings, Metrics};
 
 use crate::tabs::{SplitDir, SplitterHit};
 use crate::term::EventProxy;
-use crate::theme;
+use crate::theme::{self, Scheme};
 
 const MONACO: &str = "/System/Library/Fonts/Monaco.ttf";
 const GENEVA: &str = "/System/Library/Fonts/Geneva.ttf";
+// Monaco/Geneva に無いグリフ (日本語など) のフォールバック
+const HIRAGINO: &str = "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc";
 
 const FONT_PT: f32 = 12.0; // 端末本文 (論理px)
 const TITLE_PT: f32 = 12.0; // タイトルバー (論理px)
@@ -121,6 +123,7 @@ pub fn tab_layout(bar: Rect, n: usize, scale: f64) -> (Vec<Rect>, Rect) {
 pub struct Renderer {
     font: Font,
     title_font: Font,
+    jp_font: Option<Font>,
     font_px: f32,
     title_px: f32,
     pub cell_w: usize,
@@ -140,6 +143,9 @@ impl Renderer {
         };
         let font = load(MONACO);
         let title_font = load(GENEVA);
+        let jp_font = std::fs::read(HIRAGINO)
+            .ok()
+            .and_then(|data| Font::from_bytes(data, FontSettings::default()).ok());
 
         let font_px = (FONT_PT as f64 * scale) as f32;
         let title_px = (TITLE_PT as f64 * scale) as f32;
@@ -152,6 +158,7 @@ impl Renderer {
         Self {
             font,
             title_font,
+            jp_font,
             font_px,
             title_px,
             cell_w,
@@ -280,6 +287,7 @@ impl Renderer {
         rect: Rect,
         term: &Term<EventProxy>,
         active: bool,
+        scheme: &Scheme,
     ) {
         let (w, h) = (width as i32, height as i32);
         let e = ((self.scale).round() as i32).max(1);
@@ -289,18 +297,9 @@ impl Renderer {
         fill_rect(buf, w, h, rect.x, rect.y, e, rect.h, theme::SUNKEN_DARK);
         fill_rect(buf, w, h, rect.x, rect.bottom() - e, rect.w, e, theme::SUNKEN_LIGHT);
         fill_rect(buf, w, h, rect.right() - e, rect.y, e, rect.h, theme::SUNKEN_LIGHT);
-        fill_rect(
-            buf,
-            w,
-            h,
-            rect.x + e,
-            rect.y + e,
-            rect.w - 2 * e,
-            rect.h - 2 * e,
-            theme::CONTENT_BG,
-        );
+        fill_rect(buf, w, h, rect.x + e, rect.y + e, rect.w - 2 * e, rect.h - 2 * e, scheme.bg);
 
-        self.draw_grid(buf, w, h, self.grid_rect(rect), term, active);
+        self.draw_grid(buf, w, h, self.grid_rect(rect), term, active, scheme);
     }
 
     /// ペイン矩形から実際に文字グリッドを置く領域 (ベベル+余白の内側) を求める。
@@ -440,6 +439,73 @@ impl Renderer {
         fill_rect(buf, w, h, r.x, r.y, r.w, r.h, theme::DROP_HINT);
     }
 
+    /// 設定ウィンドウの中身 (カラースキーマのラジオボタン一覧) を描画し、
+    /// 各行のヒットテスト用矩形を返す。クロームは draw_chrome で描いておくこと。
+    pub fn draw_settings(
+        &mut self,
+        buf: &mut [u32],
+        width: u32,
+        height: u32,
+        layout: &Layout,
+        selected: usize,
+    ) -> Vec<Rect> {
+        let (w, h) = (width as i32, height as i32);
+        let scale = self.scale;
+        let s = move |v: f32| ((v as f64 * scale).round() as i32).max(1);
+        let c = layout.content;
+        let clip = Rect { x: 0, y: 0, w, h };
+
+        let ascent = self
+            .title_font
+            .horizontal_line_metrics(self.title_px)
+            .map(|m| m.ascent)
+            .unwrap_or(8.0)
+            .round() as i32;
+
+        self.draw_title_text(buf, w, h, "カラースキーマ:", c.x, c.y + ascent, theme::TITLE_TEXT, clip);
+
+        let row_h = s(24.0);
+        let mut hits = Vec::with_capacity(theme::SCHEMES.len());
+        for (i, scheme) in theme::SCHEMES.iter().enumerate() {
+            let row = Rect { x: c.x, y: c.y + s(24.0) + i as i32 * row_h, w: c.w, h: row_h };
+            let cy = row.y + row.h / 2;
+
+            // ラジオボタン
+            let r_out = s(6.0);
+            fill_circle(buf, w, h, row.x + s(8.0), cy, r_out, theme::BOX_BORDER);
+            fill_circle(buf, w, h, row.x + s(8.0), cy, r_out - s(1.0), 0xFFFFFF);
+            if i == selected {
+                fill_circle(buf, w, h, row.x + s(8.0), cy, s(3.0), 0x000000);
+            }
+
+            self.draw_title_text(
+                buf,
+                w,
+                h,
+                scheme.name,
+                row.x + s(22.0),
+                cy + ascent / 2 - s(1.0),
+                theme::TITLE_TEXT,
+                clip,
+            );
+
+            // 右端に配色見本 (背景・文字・赤・緑・青)
+            let sw_w = s(13.0);
+            let sw_h = s(11.0);
+            let gap = s(3.0);
+            let samples = [scheme.bg, scheme.fg, scheme.ansi[1], scheme.ansi[2], scheme.ansi[4]];
+            let mut x = row.right() - s(4.0) - (sw_w + gap) * samples.len() as i32;
+            for color in samples {
+                fill_rect(buf, w, h, x, cy - sw_h / 2, sw_w, sw_h, color);
+                stroke_rect(buf, w, h, x, cy - sw_h / 2, sw_w, sw_h, s(1.0), theme::BOX_BORDER);
+                x += sw_w + gap;
+            }
+
+            hits.push(row);
+        }
+        hits
+    }
+
     pub fn draw_grow_box(&self, buf: &mut [u32], width: u32, height: u32, r: Rect) {
         let (w, h) = (width as i32, height as i32);
         let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
@@ -459,6 +525,7 @@ impl Renderer {
         clip: Rect,
         term: &Term<EventProxy>,
         active: bool,
+        scheme: &Scheme,
     ) {
         let content = term.renderable_content();
         let display_offset = content.display_offset;
@@ -481,8 +548,8 @@ impl Renderer {
                 continue;
             }
 
-            let mut fg = resolve_color(colors, cell.fg, true);
-            let mut bg = resolve_color(colors, cell.bg, false);
+            let mut fg = resolve_color(colors, cell.fg, true, scheme);
+            let mut bg = resolve_color(colors, cell.bg, false, scheme);
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
@@ -492,7 +559,7 @@ impl Renderer {
 
             let x = clip.x + col * cw;
             let y = clip.y + row * ch;
-            if bg != theme::CONTENT_BG {
+            if bg != scheme.bg {
                 let bw = if cell.flags.contains(Flags::WIDE_CHAR) { cw * 2 } else { cw };
                 fill_rect_clipped(buf, w, h, x, y, bw, ch, bg, &clip);
             }
@@ -515,7 +582,7 @@ impl Renderer {
         }
         let x = clip.x + col * cw;
         let y = clip.y + row * ch;
-        let cursor_color = resolve_named(colors, NamedColor::Cursor, theme::CURSOR);
+        let cursor_color = resolve_named(colors, NamedColor::Cursor, scheme.cursor);
         let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
 
         if !active {
@@ -534,7 +601,7 @@ impl Renderer {
                 fill_rect_clipped(buf, w, h, x, y, cw, ch, cursor_color, &clip);
                 let c = term.grid()[cursor.point].c;
                 if c != ' ' {
-                    self.draw_cell_glyph(buf, w, h, c, x, y, theme::CONTENT_BG, &clip);
+                    self.draw_cell_glyph(buf, w, h, c, x, y, scheme.bg, &clip);
                 }
             }
         }
@@ -552,7 +619,11 @@ impl Renderer {
         clip: &Rect,
     ) {
         let px = self.font_px;
-        let font = &self.font;
+        let font = if self.font.lookup_glyph_index(c) != 0 {
+            &self.font
+        } else {
+            self.jp_font.as_ref().unwrap_or(&self.font)
+        };
         let (metrics, bitmap) = self.glyphs.entry(c).or_insert_with(|| font.rasterize(c, px));
         let gx = cell_x + metrics.xmin;
         let gy = cell_y + self.ascent - metrics.ymin - metrics.height as i32;
@@ -561,9 +632,13 @@ impl Renderer {
 
     fn measure_title(&mut self, text: &str) -> i32 {
         let px = self.title_px;
-        let font = &self.title_font;
         let mut total = 0.0f32;
         for c in text.chars() {
+            let font = if self.title_font.lookup_glyph_index(c) != 0 {
+                &self.title_font
+            } else {
+                self.jp_font.as_ref().unwrap_or(&self.title_font)
+            };
             let (m, _) = self.title_glyphs.entry(c).or_insert_with(|| font.rasterize(c, px));
             total += m.advance_width;
         }
@@ -582,9 +657,13 @@ impl Renderer {
         clip: Rect,
     ) {
         let px = self.title_px;
-        let font = &self.title_font;
         let mut pen = x as f32;
         for c in text.chars() {
+            let font = if self.title_font.lookup_glyph_index(c) != 0 {
+                &self.title_font
+            } else {
+                self.jp_font.as_ref().unwrap_or(&self.title_font)
+            };
             let (metrics, bitmap) =
                 self.title_glyphs.entry(c).or_insert_with(|| font.rasterize(c, px));
             let gx = pen.round() as i32 + metrics.xmin;
@@ -607,14 +686,13 @@ fn pack(rgb: Rgb) -> u32 {
     ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32
 }
 
-fn resolve_color(colors: &Colors, color: Color, is_fg: bool) -> u32 {
+fn resolve_color(colors: &Colors, color: Color, is_fg: bool, scheme: &Scheme) -> u32 {
     match color {
         Color::Spec(rgb) => pack(rgb),
-        Color::Indexed(i) => {
-            colors[i as usize].map(pack).unwrap_or_else(|| theme::indexed256(i))
-        }
+        Color::Indexed(i) if i < 16 => colors[i as usize].map(pack).unwrap_or(scheme.ansi[i as usize]),
+        Color::Indexed(i) => colors[i as usize].map(pack).unwrap_or_else(|| theme::indexed256(i)),
         Color::Named(named) => {
-            let fallback = named_fallback(named, is_fg);
+            let fallback = named_fallback(named, is_fg, scheme);
             colors[named as usize].map(pack).unwrap_or(fallback)
         }
     }
@@ -624,24 +702,24 @@ fn resolve_named(colors: &Colors, named: NamedColor, fallback: u32) -> u32 {
     colors[named as usize].map(pack).unwrap_or(fallback)
 }
 
-fn named_fallback(named: NamedColor, is_fg: bool) -> u32 {
+fn named_fallback(named: NamedColor, is_fg: bool, scheme: &Scheme) -> u32 {
     use NamedColor::*;
     match named {
-        Foreground | BrightForeground => theme::CONTENT_FG,
-        Background => theme::CONTENT_BG,
-        Cursor => theme::CURSOR,
-        DimForeground => dim(theme::CONTENT_FG),
+        Foreground | BrightForeground => scheme.fg,
+        Background => scheme.bg,
+        Cursor => scheme.cursor,
+        DimForeground => dim(scheme.fg),
         DimBlack | DimRed | DimGreen | DimYellow | DimBlue | DimMagenta | DimCyan | DimWhite => {
-            dim(theme::ANSI16[named as usize - DimBlack as usize])
+            dim(scheme.ansi[named as usize - DimBlack as usize])
         }
         _ => {
             let idx = named as usize;
             if idx < 16 {
-                theme::ANSI16[idx]
+                scheme.ansi[idx]
             } else if is_fg {
-                theme::CONTENT_FG
+                scheme.fg
             } else {
-                theme::CONTENT_BG
+                scheme.bg
             }
         }
     }
@@ -685,6 +763,20 @@ fn fill_rect_clipped(
     let y1 = (y + h).min(clip.bottom());
     if x1 > x0 && y1 > y0 {
         fill_rect(buf, bw, bh, x0, y0, x1 - x0, y1 - y0, color);
+    }
+}
+
+fn fill_circle(buf: &mut [u32], bw: i32, bh: i32, cx: i32, cy: i32, r: i32, color: u32) {
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            let (px, py) = (cx + dx, cy + dy);
+            if px >= 0 && px < bw && py >= 0 && py < bh {
+                buf[(py * bw + px) as usize] = color;
+            }
+        }
     }
 }
 

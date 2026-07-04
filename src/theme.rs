@@ -46,6 +46,75 @@ pub const ANSI16: [u32; 16] = [
     0xE5E5E5, // bright white
 ];
 
+/// 端末のカラースキーマ。ウィンドウクロームの配色は Platinum 固定で、
+/// これはコンテンツ (文字グリッド) のみに適用される。
+pub struct Scheme {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub fg: u32,
+    pub bg: u32,
+    pub cursor: u32,
+    pub ansi: [u32; 16],
+}
+
+const SOLARIZED_ANSI: [u32; 16] = [
+    0x073642, 0xDC322F, 0x859900, 0xB58900, 0x268BD2, 0xD33682, 0x2AA198, 0xEEE8D5,
+    0x002B36, 0xCB4B16, 0x586E75, 0x657B83, 0x839496, 0x6C71C4, 0x93A1A1, 0xFDF6E3,
+];
+
+const DARK_ANSI: [u32; 16] = [
+    0x000000, 0xCD3131, 0x0DBC79, 0xE5E510, 0x2472C8, 0xBC3FBC, 0x11A8CD, 0xE5E5E5,
+    0x666666, 0xF14C4C, 0x23D18B, 0xF5F543, 0x3B8EEA, 0xD670D6, 0x29B8DB, 0xFFFFFF,
+];
+
+pub static SCHEMES: &[Scheme] = &[
+    Scheme {
+        id: "classic",
+        name: "クラシック (白地)",
+        fg: CONTENT_FG,
+        bg: CONTENT_BG,
+        cursor: CURSOR,
+        ansi: ANSI16,
+    },
+    Scheme {
+        id: "dark",
+        name: "ダーク",
+        fg: 0xCCCCCC,
+        bg: 0x1E1E1E,
+        cursor: 0xCCCCCC,
+        ansi: DARK_ANSI,
+    },
+    Scheme {
+        id: "solarized-dark",
+        name: "Solarized ダーク",
+        fg: 0x839496,
+        bg: 0x002B36,
+        cursor: 0x93A1A1,
+        ansi: SOLARIZED_ANSI,
+    },
+    Scheme {
+        id: "solarized-light",
+        name: "Solarized ライト",
+        fg: 0x657B83,
+        bg: 0xFDF6E3,
+        cursor: 0x586E75,
+        ansi: SOLARIZED_ANSI,
+    },
+    Scheme {
+        id: "green-crt",
+        name: "グリーンCRT",
+        fg: 0x33FF33,
+        bg: 0x0A0A0A,
+        cursor: 0x33FF33,
+        ansi: DARK_ANSI,
+    },
+];
+
+/// id からスキーマのインデックスを引く。見つからなければ 0 (クラシック)。
+pub fn scheme_index(id: &str) -> usize {
+    SCHEMES.iter().position(|s| s.id == id).unwrap_or(0)
+}
+
 /// xterm 256色パレットの既定値を返す。
 pub fn indexed256(i: u8) -> u32 {
     let i = i as u32;

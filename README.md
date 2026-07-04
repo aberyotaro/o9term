@@ -24,12 +24,15 @@ Mac OS 9 (Platinum) 風の見た目を持つ、Rust製ターミナルエミュ�
 
 ```
 src/
-├── main.rs      … winitイベントループ、キー/マウス入力のハンドリング
+├── main.rs      … winitイベントループ、キー/マウス入力、設定ウィンドウ
 ├── tabs.rs      … タブとペイン二分木（分割・削除・レイアウト計算）
 ├── term.rs      … PTYとalacritty_terminalの起動・接続
 ├── renderer.rs  … Platinumクローム + タブバー + グリッドのCPUレンダラ
-└── theme.rs     … Platinum配色とANSIパレット
+├── theme.rs     … Platinum配色・ANSIパレット・カラースキーマ定義
+└── config.rs    … 設定の永続化（~/.config/os9terminal/config.toml）
 ```
+
+カラースキーマは クラシック（白地）/ ダーク / Solarized ダーク / Solarized ライト / グリーンCRT の5種。Cmd+, で開くOS9コントロールパネル風の設定ウィンドウから選択でき、即時反映・自動保存される。
 
 ## ビルド・実行
 
@@ -54,6 +57,7 @@ cargo run
 | 左右分割 / 上下分割 | Cmd+D / Cmd+Shift+D |
 | ペイン間フォーカス移動 | Cmd+Option+矢印 |
 | ペインを閉じる | シェルのexit、または Cmd+Shift+W |
+| 設定（カラースキーマ） | Cmd+,（Escapeまたはクローズボックスで閉じる） |
 
 タブバーはタブが2枚以上のときだけ表示される（1枚なら従来の見た目のまま）。
 
