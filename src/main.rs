@@ -176,7 +176,25 @@ impl App {
         tab.root.find_pane(tab.focused).map(|p| &p.terminal)
     }
 
+    /// 各ペインのタイトルをシェルの cwd (ホームは ~ に短縮) で更新する。
+    fn update_titles(&mut self) {
+        let home = std::env::var("HOME").unwrap_or_default();
+        for tab in &mut self.tabs {
+            tab.root.for_each_pane_mut(&mut |pane| {
+                let Some(cwd) = pane.terminal.cwd() else { return };
+                let path = cwd.to_string_lossy();
+                pane.title = match path.strip_prefix(&home) {
+                    Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+                        format!("~{rest}")
+                    }
+                    _ => path.into_owned(),
+                };
+            });
+        }
+    }
+
     fn render(&mut self) {
+        self.update_titles();
         self.update_layout();
         let (Some(window), Some(surface), Some(renderer)) =
             (self.window.as_ref(), self.surface.as_mut(), self.renderer.as_mut())
@@ -199,7 +217,7 @@ impl App {
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, t)| (t.title().to_string(), i == self.active_tab))
+            .map(|(i, t)| (t.label(), i == self.active_tab))
             .collect();
         let title = tab.title().to_string();
 
@@ -546,24 +564,8 @@ impl ApplicationHandler<UserEvent> for App {
                     self.redraw();
                 }
             }
-            TermEvent::Title(title) => {
-                for tab in &mut self.tabs {
-                    if let Some(p) = tab.root.find_pane_mut(pane) {
-                        p.title = title;
-                        break;
-                    }
-                }
-                self.redraw();
-            }
-            TermEvent::ResetTitle => {
-                for tab in &mut self.tabs {
-                    if let Some(p) = tab.root.find_pane_mut(pane) {
-                        p.title = DEFAULT_TITLE.into();
-                        break;
-                    }
-                }
-                self.redraw();
-            }
+            // タイトルは常にシェルの cwd を表示するため、OSC のタイトル変更は無視する
+            TermEvent::Title(_) | TermEvent::ResetTitle => {}
             TermEvent::PtyWrite(text) => {
                 for tab in &self.tabs {
                     if let Some(p) = tab.root.find_pane(pane) {

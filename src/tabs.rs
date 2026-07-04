@@ -156,16 +156,6 @@ impl PaneNode {
         }
     }
 
-    pub fn find_pane_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
-        match self {
-            PaneNode::Leaf(pane) if pane.id == id => Some(pane),
-            PaneNode::Split { first, second, .. } => {
-                first.find_pane_mut(id).or_else(|| second.find_pane_mut(id))
-            }
-            _ => None,
-        }
-    }
-
     pub fn first_pane(&self) -> Option<&Pane> {
         match self {
             PaneNode::Leaf(pane) => Some(pane),
@@ -178,6 +168,18 @@ impl PaneNode {
 
     pub fn contains(&self, id: PaneId) -> bool {
         self.find_pane(id).is_some()
+    }
+
+    /// 全ペインに対して処理を実行する。
+    pub fn for_each_pane_mut(&mut self, f: &mut impl FnMut(&mut Pane)) {
+        match self {
+            PaneNode::Leaf(pane) => f(pane),
+            PaneNode::Split { first, second, .. } => {
+                first.for_each_pane_mut(f);
+                second.for_each_pane_mut(f);
+            }
+            PaneNode::Empty => {}
+        }
     }
 
     /// このノードが `id` の葉そのものかどうか (= 最後の1ペインか)。
@@ -196,12 +198,21 @@ impl Tab {
         Self { focused: pane.id, root: PaneNode::Leaf(pane) }
     }
 
-    /// タブの表示タイトル = フォーカス中ペインのタイトル。
+    /// タブの表示タイトル = フォーカス中ペインのタイトル (cwd のフルパス)。
     pub fn title(&self) -> &str {
         self.root
             .find_pane(self.focused)
             .or_else(|| self.root.first_pane())
             .map(|p| p.title.as_str())
             .unwrap_or("")
+    }
+
+    /// タブに表示する短いラベル = パスの末尾ディレクトリ名。
+    pub fn label(&self) -> String {
+        let title = self.title();
+        match title.rsplit('/').next() {
+            Some(last) if !last.is_empty() => last.to_string(),
+            _ => title.to_string(),
+        }
     }
 }

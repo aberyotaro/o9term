@@ -1,6 +1,7 @@
 //! PTY とターミナルエミュレーション層 (alacritty_terminal) の起動・接続。
 
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
@@ -59,6 +60,8 @@ impl Dimensions for GridSize {
 pub struct Terminal {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     sender: EventLoopSender,
+    /// シェル (PTY の子プロセス) の PID。cwd の取得に使う。
+    child_pid: i32,
 }
 
 impl Terminal {
@@ -80,12 +83,18 @@ impl Terminal {
         options.env.insert("TERM".into(), "xterm-256color".into());
         options.env.insert("COLORTERM".into(), "truecolor".into());
         let pty = tty::new(&options, window_size, 0)?;
+        let child_pid = pty.child().id() as i32;
 
         let event_loop = PtyEventLoop::new(term.clone(), event_proxy, pty, false, false)?;
         let sender = event_loop.channel();
         event_loop.spawn();
 
-        Ok(Self { term, sender })
+        Ok(Self { term, sender, child_pid })
+    }
+
+    /// シェルの現在の作業ディレクトリを取得する (macOS の proc_pidinfo)。
+    pub fn cwd(&self) -> Option<PathBuf> {
+        proc_cwd(self.child_pid)
     }
 
     /// バイト列をシェル (PTY) へ送る。
@@ -112,4 +121,76 @@ impl Drop for Terminal {
         // ペインやタブを閉じたとき、PTY の読み書きスレッドを確実に止める
         self.shutdown();
     }
+}
+
+// ─── macOS: プロセスの cwd 取得 ───
+//
+// libproc.h の proc_pidinfo(PROC_PIDVNODEPATHINFO) を直接呼ぶ。
+// 構造体レイアウトは XNU の bsd/sys/proc_info.h に一致させてある:
+//   struct vnode_info_path = struct vnode_info (152 bytes) + char[MAXPATHLEN]
+//   struct proc_vnodepathinfo = pvi_cdir + pvi_rdir
+
+const PROC_PIDVNODEPATHINFO: std::os::raw::c_int = 9;
+const MAXPATHLEN: usize = 1024;
+
+#[repr(C)]
+struct VnodeInfoPath {
+    vnode_info: [u8; 152],
+    path: [u8; MAXPATHLEN],
+}
+
+#[repr(C)]
+struct ProcVnodePathInfo {
+    cdir: VnodeInfoPath,
+    rdir: VnodeInfoPath,
+}
+
+unsafe extern "C" {
+    fn proc_pidinfo(
+        pid: std::os::raw::c_int,
+        flavor: std::os::raw::c_int,
+        arg: u64,
+        buffer: *mut std::os::raw::c_void,
+        buffersize: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proc_cwd;
+
+    #[test]
+    fn proc_cwd_returns_own_cwd() {
+        // 自プロセスの cwd が env::current_dir と一致すれば
+        // FFI の構造体レイアウトが正しいことの裏付けになる
+        let expected = std::env::current_dir().unwrap();
+        let actual = proc_cwd(std::process::id() as i32).expect("proc_cwd が失敗");
+        assert_eq!(actual, expected);
+    }
+}
+
+fn proc_cwd(pid: i32) -> Option<PathBuf> {
+    let mut info = ProcVnodePathInfo {
+        cdir: VnodeInfoPath { vnode_info: [0; 152], path: [0; MAXPATHLEN] },
+        rdir: VnodeInfoPath { vnode_info: [0; 152], path: [0; MAXPATHLEN] },
+    };
+    let size = std::mem::size_of::<ProcVnodePathInfo>() as std::os::raw::c_int;
+    let ret = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            &mut info as *mut _ as *mut std::os::raw::c_void,
+            size,
+        )
+    };
+    if ret != size {
+        return None;
+    }
+    let path = &info.cdir.path;
+    let len = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+    if len == 0 {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf8_lossy(&path[..len]).into_owned()))
 }
