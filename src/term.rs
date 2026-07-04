@@ -93,8 +93,19 @@ impl Terminal {
     }
 
     /// シェルの現在の作業ディレクトリを取得する (macOS の proc_pidinfo)。
+    ///
+    /// alacritty_terminal は macOS ではシェルを /usr/bin/login (root で動く
+    /// setuid プロセス) 経由で起動するため、child_pid の cwd は権限エラーで
+    /// 読めない。読めるようになるまで子プロセスを辿る (login → zsh)。
     pub fn cwd(&self) -> Option<PathBuf> {
-        proc_cwd(self.child_pid)
+        let mut pid = self.child_pid;
+        for _ in 0..4 {
+            if let Some(path) = proc_cwd(pid) {
+                return Some(path);
+            }
+            pid = *child_pids(pid).first()?;
+        }
+        None
     }
 
     /// バイト列をシェル (PTY) へ送る。
@@ -145,6 +156,8 @@ struct ProcVnodePathInfo {
     rdir: VnodeInfoPath,
 }
 
+const PROC_PPID_ONLY: u32 = 6;
+
 unsafe extern "C" {
     fn proc_pidinfo(
         pid: std::os::raw::c_int,
@@ -153,6 +166,32 @@ unsafe extern "C" {
         buffer: *mut std::os::raw::c_void,
         buffersize: std::os::raw::c_int,
     ) -> std::os::raw::c_int;
+
+    fn proc_listpids(
+        proc_type: u32,
+        typeinfo: u32,
+        buffer: *mut std::os::raw::c_void,
+        buffersize: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+}
+
+/// `ppid` を親に持つプロセスの PID 一覧を返す。
+fn child_pids(ppid: i32) -> Vec<i32> {
+    let mut buf = [0i32; 64];
+    let bytes = (buf.len() * std::mem::size_of::<i32>()) as std::os::raw::c_int;
+    let ret = unsafe {
+        proc_listpids(
+            PROC_PPID_ONLY,
+            ppid as u32,
+            buf.as_mut_ptr() as *mut std::os::raw::c_void,
+            bytes,
+        )
+    };
+    if ret <= 0 {
+        return Vec::new();
+    }
+    let n = (ret as usize / std::mem::size_of::<i32>()).min(buf.len());
+    buf[..n].iter().copied().filter(|&pid| pid > 0).collect()
 }
 
 #[cfg(test)]
@@ -166,6 +205,22 @@ mod tests {
         let expected = std::env::current_dir().unwrap();
         let actual = proc_cwd(std::process::id() as i32).expect("proc_cwd が失敗");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn proc_cwd_works_for_child_process() {
+        // 実際の用途 (シェル = 子プロセス) と同じ形で検証する
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .current_dir("/tmp")
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let actual = proc_cwd(child.id() as i32);
+        let _ = child.kill();
+        let _ = child.wait();
+        // /tmp は /private/tmp へのシンボリックリンク
+        assert_eq!(actual.expect("proc_cwd が失敗"), std::path::PathBuf::from("/private/tmp"));
     }
 }
 

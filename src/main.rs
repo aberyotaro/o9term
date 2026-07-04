@@ -181,6 +181,9 @@ impl App {
         let home = std::env::var("HOME").unwrap_or_default();
         for tab in &mut self.tabs {
             tab.root.for_each_pane_mut(&mut |pane| {
+                if std::env::var("OS9_DEBUG").is_ok() {
+                    eprintln!("[debug] pane={} cwd={:?}", pane.id, pane.terminal.cwd());
+                }
                 let Some(cwd) = pane.terminal.cwd() else { return };
                 let path = cwd.to_string_lossy();
                 pane.title = match path.strip_prefix(&home) {
