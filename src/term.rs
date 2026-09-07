@@ -81,6 +81,14 @@ impl Terminal {
 
         let mut options = tty::Options::default();
         options.env.insert("TERM_PROGRAM".into(), "os9terminal".into());
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(contents) = executable.parent().and_then(|dir| dir.parent()) {
+                let resources = contents.join("Resources");
+                if resources.join("integration.zsh").is_file() {
+                    options.env.insert("OS9_RESOURCES".into(), resources.to_string_lossy().into_owned());
+                }
+            }
+        }
         options.env.insert("TERM".into(), "xterm-256color".into());
         options.env.insert("COLORTERM".into(), "truecolor".into());
         let pty = tty::new(&options, window_size, 0)?;

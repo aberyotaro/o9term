@@ -31,6 +31,26 @@ use term::{PaneId, Terminal, UserEvent};
 const DEFAULT_TITLE: &str = "0s9 Terminal";
 
 fn main() {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--version" {
+            println!("o9 {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        if arg == "--working-directory" {
+            let Some(path) = args.next() else {
+                eprintln!("--working-directory requires a directory");
+                std::process::exit(2);
+            };
+            if let Err(error) = std::env::set_current_dir(path) {
+                eprintln!("Cannot open working directory: {error}");
+                std::process::exit(2);
+            }
+        } else {
+            eprintln!("Usage: os9terminal [--working-directory PATH] [--version]");
+            std::process::exit(2);
+        }
+    }
     let event_loop =
         EventLoop::<UserEvent>::with_user_event().build().expect("イベントループ作成失敗");
     event_loop.set_control_flow(ControlFlow::Wait);

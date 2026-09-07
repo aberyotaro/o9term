@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+app="$HOME/Applications/0s9terminal.app"
+case "${1-}" in
+    --help|-h) printf 'Usage: o9 [directory]\n'; exit 0 ;;
+    --version) exec "$app/Contents/MacOS/os9terminal" --version ;;
+esac
+if [ "$#" -gt 1 ]; then
+    printf 'Usage: o9 [directory]\n' >&2
+    exit 2
+fi
+directory=$(cd -- "${1:-$PWD}" && pwd -P)
+exec /usr/bin/open -n "$app" --args --working-directory "$directory"

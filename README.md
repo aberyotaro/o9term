@@ -1,4 +1,4 @@
-# 0s9terminal
+# o9term
 
 Mac OS 9 (Platinum) 風の見た目を持つ、Rust製ターミナルエミュレータ。macOS専用。
 
@@ -38,11 +38,16 @@ src/
 
 カラースキーマは クラシック（白地）/ ダーク / Solarized ダーク / Solarized ライト / グリーンCRT の5種。Cmd+, で開くOS9コントロールパネル風の設定ウィンドウから選択でき、即時反映・自動保存される。
 
-## ビルド・実行
+## 起動
+
+インストール後は、任意のディレクトリから:
 
 ```sh
-cargo run
+o9
 ```
+
+そのディレクトリで起動します。入力・コード表示の構文ハイライトも設定済みです。
+開発・配布パッケージの作成については[開発ガイド](docs/development.md)を参照してください。
 
 ## 操作
 
@@ -75,28 +80,3 @@ cargo run
 - [ ] カラプスボックスでのウィンドウシェード（現在は最小化）
 - [ ] ベルのビジュアルフラッシュ
 - [ ] ビットマップ風レンダリング（アンチエイリアス無効）オプション
-
-## Syntax highlight
-
-Homebrew導入済みのmacOSで、初回に実行:
-
-```sh
-python3 scripts/setup-highlighting.py
-```
-
-batとzsh-syntax-highlightingをインストールし、連携スクリプトを
-~/.config/os9terminal/integration.zshへ配置、.zshrcの末尾に読み込みを追加する。
-既存.zshrcは初回変更時に.zshrc.os9terminal-backupへ保存する。
-ZDOTDIRを使う場合は同じ環境変数を指定して実行する。
-
-新しいタブを開くと、zshの入力中のコマンド・文字列などが色分けされる。
-ファイルは `bat src/main.rs`、ページ送りなしなら
-`bat --paging=never src/main.rs` で表示する。
-batのANSIテーマを既定にし、端末の配色に追従する（既存BAT_THEME設定は優先）。
-この連携は0s9terminalの対話zsh内でのみ有効。
-catや他のコマンドの出力は自動で構文解析しない。
-
-解除する場合は.zshrc末尾の0s9terminal読み込み行を削除する。
-
-参照: [zsh-syntax-highlighting](https://github.com/zsh-users/zsh-syntax-highlighting/blob/master/INSTALL.md)、
-[bat](https://github.com/sharkdp/bat)。
