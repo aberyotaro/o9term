@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-app="$HOME/Applications/0s9terminal.app"
+app="$HOME/Applications/o9term.app"
 case "${1-}" in
     --help|-h) printf 'Usage: o9 [directory]\n'; exit 0 ;;
     --version) exec "$app/Contents/MacOS/os9terminal" --version ;;

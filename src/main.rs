@@ -1,4 +1,4 @@
-//! 0s9terminal — Mac OS 9 (Platinum) 風ターミナルエミュレータ。
+//! o9term — Mac OS 9 (Platinum) 風ターミナルエミュレータ。
 //! ウィンドウ装飾は OS 標準を使わず、タイトルバーごと自前で描画する。
 
 mod clipboard;
@@ -28,7 +28,7 @@ use renderer::{tab_layout, Layout, Rect, Renderer};
 use tabs::{Pane, SplitDir, SplitterHit, Tab};
 use term::{PaneId, Terminal, UserEvent};
 
-const DEFAULT_TITLE: &str = "0s9 Terminal";
+const DEFAULT_TITLE: &str = "o9term";
 
 fn main() {
     let mut args = std::env::args_os().skip(1);

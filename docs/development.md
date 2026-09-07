@@ -24,7 +24,7 @@ The command opens a new window in the caller's working directory;
 `o9 /path/to/project` can specify a directory.
 
 The installer backs up shell configuration before first modification and keeps
-the previous application as `0s9terminal.app.previous` when updating.
+the previous application as `o9term.app.previous` when updating.
 Subsequent updates require moving that previous backup first.
 For uninstallation, remove the app and launcher, then remove the integration
 line in .zshrc. The installer also adds ~/.local/bin to .zprofile.

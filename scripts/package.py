@@ -30,7 +30,7 @@ extra = [f"--remap-path-prefix={Path.home()}=/build/user",
 env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(
     filter(None, [env.get("CARGO_ENCODED_RUSTFLAGS", ""), *extra]))
 run("cargo", "build", "--release", "--locked", cwd=ROOT, env=env)
-app = stage / "0s9terminal.app"
+app = stage / "o9term.app"
 contents = app / "Contents"
 resources = contents / "Resources"
 macos = contents / "MacOS"
@@ -87,6 +87,7 @@ with (contents / "Info.plist").open("wb") as stream:
         "CFBundleExecutable": "os9terminal",
         "CFBundleIdentifier": "io.github.aberyotaro.o9term",
         "CFBundleName": "o9term",
+        "CFBundleDisplayName": "o9term",
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,
