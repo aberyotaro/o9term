@@ -4,7 +4,7 @@ Mac OS 9 (Platinum) 風の見た目を持つ、Rust製ターミナルエミュ�
 
 ![status](https://img.shields.io/badge/status-prototype-orange)
 
-![Platinum風タブと分割ペイン、Rustコードの構文ハイライト](docs/images/terminal.png)
+![o9termのPlatinum風タブと分割ペイン、Rustコードの構文ハイライト](docs/images/terminal.png)
 
 公開用サンプルを表示した実際のアプリ画面。
 
@@ -33,7 +33,7 @@ src/
 ├── term.rs      … PTYとalacritty_terminalの起動・接続
 ├── renderer.rs  … Platinumクローム + タブバー + グリッドのCPUレンダラ
 ├── theme.rs     … Platinum配色・ANSIパレット・カラースキーマ定義
-└── config.rs    … 設定の永続化（~/.config/os9terminal/config.toml）
+└── config.rs    … カラースキーマ設定の保存・読み込み
 ```
 
 カラースキーマは クラシック（白地）/ ダーク / Solarized ダーク / Solarized ライト / グリーンCRT の5種。Cmd+, で開くOS9コントロールパネル風の設定ウィンドウから選択でき、即時反映・自動保存される。

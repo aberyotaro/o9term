@@ -52,3 +52,8 @@ and adds the scoped zsh integration. Release users do not run this helper.
 Input highlighting is provided by zsh-syntax-highlighting.
 Use `bat file.rs` to view a code file, or `bat --paging=never file.rs` to avoid
 paging. The ANSI theme follows the terminal palette; existing BAT_THEME wins.
+
+## Configuration compatibility
+
+Settings remain at `~/.config/os9terminal/config.toml` to preserve existing
+installations after the project rename to o9term.
