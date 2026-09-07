@@ -1,6 +1,7 @@
 //! 0s9terminal — Mac OS 9 (Platinum) 風ターミナルエミュレータ。
 //! ウィンドウ装飾は OS 標準を使わず、タイトルバーごと自前で描画する。
 
+mod clipboard;
 mod config;
 mod renderer;
 mod tabs;
@@ -9,6 +10,9 @@ mod theme;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
+use alacritty_terminal::index::{Column, Point, Side as CellSide};
+use alacritty_terminal::selection::{Selection, SelectionType};
 
 use alacritty_terminal::event::{Event as TermEvent, WindowSize};
 use alacritty_terminal::grid::Scroll;
@@ -96,6 +100,7 @@ impl Side {
 enum MouseDrag {
     Splitter(SplitterDrag),
     Tab(TabDrag),
+    Selection(PaneId),
 }
 
 /// 設定ウィンドウ (カラースキーマ選択) の状態。
@@ -130,6 +135,7 @@ struct App {
     focused: bool,
     scheme_index: usize,
     settings: Option<SettingsState>,
+    last_click: Option<(PaneId, Point, Instant, u8)>,
 }
 
 impl App {
@@ -154,6 +160,7 @@ impl App {
             focused: true,
             scheme_index: theme::scheme_index(&config::load_scheme().unwrap_or_default()),
             settings: None,
+            last_click: None,
         }
     }
 
@@ -662,7 +669,11 @@ impl App {
 
         if let Some(bytes) = bytes {
             // 入力時はスクロールを最下部へ戻す
-            terminal.term.lock().scroll_display(Scroll::Bottom);
+            {
+                let mut term = terminal.term.lock();
+                term.selection = None;
+                term.scroll_display(Scroll::Bottom);
+            }
             terminal.write(bytes);
         }
     }
@@ -688,6 +699,8 @@ impl App {
                 self.tabs.clear(); // 全 PTY を停止
                 event_loop.exit();
             }
+            "c" => self.copy_selection(),
+            "v" => self.paste_clipboard(),
             "t" => self.new_tab(),
             "w" if shift => self.close_focused_pane(event_loop),
             "w" => self.close_active_tab(event_loop),
@@ -755,12 +768,81 @@ impl App {
         }
         if let Some((id, _)) = self.pane_hits.iter().find(|(_, r)| r.contains(x, y)) {
             let id = *id;
-            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                if tab.focused != id {
-                    tab.focused = id;
-                    self.redraw();
+            self.tabs[self.active_tab].focused = id;
+            if let Some((point, side)) = self.selection_point(id) {
+                let now = Instant::now();
+                let count = self.last_click.filter(|(pid, p, t, _)|
+                    *pid == id && *p == point && now.duration_since(*t) < Duration::from_millis(400))
+                    .map_or(1, |(_, _, _, n)| n % 3 + 1);
+                self.last_click = Some((id, point, now, count));
+                let ty = match count {
+                    2 => SelectionType::Semantic,
+                    3 => SelectionType::Lines,
+                    _ => SelectionType::Simple,
+                };
+                if let Some(terminal) = self.focused_terminal() {
+                    terminal.term.lock().selection = Some(Selection::new(ty, point, side));
+                }
+                self.drag = Some(MouseDrag::Selection(id));
+            }
+            self.redraw();
+        }
+    }
+
+    fn selection_point(&self, id: PaneId) -> Option<(Point, CellSide)> {
+        let renderer = self.renderer.as_ref()?;
+        let rect = self.pane_hits.iter().find(|(pid, _)| *pid == id)?.1;
+        let grid = renderer.grid_rect(rect);
+        let pane = self.tabs.get(self.active_tab)?.root.find_pane(id)?;
+        let term = pane.terminal.term.lock();
+        let cw = renderer.cell_w as f64;
+        let ch = renderer.cell_h as f64;
+        let x = (self.cursor_pos.0 - grid.x as f64).clamp(0.0, (grid.w - 1).max(0) as f64);
+        let y = (self.cursor_pos.1 - grid.y as f64).clamp(0.0, (grid.h - 1).max(0) as f64);
+        use alacritty_terminal::grid::Dimensions;
+        let col = (x / cw) as usize;
+        let row = (y / ch) as usize;
+        let point = alacritty_terminal::term::viewport_to_point(
+            term.grid().display_offset(),
+            Point::new(row.min(term.screen_lines() - 1), Column(col.min(term.columns() - 1))));
+        let side = if x % cw < cw / 2.0 { CellSide::Left } else { CellSide::Right };
+        Some((point, side))
+    }
+
+    fn update_selection(&mut self, id: PaneId) {
+        if let Some((point, side)) = self.selection_point(id) {
+            if let Some(pane) = self.tabs[self.active_tab].root.find_pane(id) {
+                if let Some(selection) = pane.terminal.term.lock().selection.as_mut() {
+                    selection.update(point, side);
                 }
             }
+            self.redraw();
+        }
+    }
+
+    fn copy_selection(&self) {
+        let text = self.focused_terminal()
+            .and_then(|terminal| terminal.term.lock().selection_to_string());
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            if let Err(error) = clipboard::set(&text) {
+                eprintln!("Copy failed: {error}");
+            }
+        }
+    }
+
+    fn paste_clipboard(&self) {
+        let Some(terminal) = self.focused_terminal() else { return };
+        match clipboard::get() {
+            Ok(text) => {
+                let mut term = terminal.term.lock();
+                let bracketed = term.mode().contains(TermMode::BRACKETED_PASTE);
+                term.selection = None;
+                term.scroll_display(Scroll::Bottom);
+                drop(term);
+                terminal.write(clipboard::paste_bytes(&text, bracketed));
+                self.redraw();
+            }
+            Err(error) => eprintln!("Paste failed: {error}"),
         }
     }
 
@@ -995,6 +1077,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                if !focused { self.drag = None; }
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
@@ -1003,6 +1086,7 @@ impl ApplicationHandler<UserEvent> for App {
                 match &self.drag {
                     Some(MouseDrag::Splitter(_)) => self.handle_splitter_drag(),
                     Some(MouseDrag::Tab(_)) => self.handle_tab_drag(),
+                    Some(MouseDrag::Selection(id)) => self.update_selection(*id),
                     None => {}
                 }
             }

@@ -80,6 +80,7 @@ impl Terminal {
         let term = Arc::new(FairMutex::new(term));
 
         let mut options = tty::Options::default();
+        options.env.insert("TERM_PROGRAM".into(), "os9terminal".into());
         options.env.insert("TERM".into(), "xterm-256color".into());
         options.env.insert("COLORTERM".into(), "truecolor".into());
         let pty = tty::new(&options, window_size, 0)?;

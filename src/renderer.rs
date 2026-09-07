@@ -557,6 +557,11 @@ impl Renderer {
                 fg = dim(fg);
             }
 
+            if content.selection.as_ref().is_some_and(|selection|
+                selection.contains_cell(&indexed, cursor.point, CursorShape::Hidden)) {
+                fg = scheme.bg;
+                bg = scheme.fg;
+            }
             let x = clip.x + col * cw;
             let y = clip.y + row * ch;
             if bg != scheme.bg {

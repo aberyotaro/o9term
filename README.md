@@ -4,6 +4,10 @@ Mac OS 9 (Platinum) 風の見た目を持つ、Rust製ターミナルエミュ�
 
 ![status](https://img.shields.io/badge/status-prototype-orange)
 
+![Platinum風タブと分割ペイン、Rustコードの構文ハイライト](docs/images/terminal.png)
+
+公開用サンプルを表示した実際のアプリ画面。
+
 ## 特徴
 
 - OS標準のウィンドウ装飾を使わず、タイトルバー（横縞・クローズ/ズーム/カラプスボックス・グローボックス）をピクセル単位で自前描画
@@ -45,6 +49,8 @@ cargo run
 - タイトルバーをドラッグ → ウィンドウ移動
 - 左のクローズボックス → 終了（Cmd+Q でも可）
 - 右下のグローボックス → リサイズ
+- 端末内ドラッグ → テキスト選択（ダブルクリックで単語、トリプルクリックで行）
+- Cmd+C → 選択文字列をコピー、Cmd+V → フォーカス中ペインへ貼り付け
 - マウスホイール → スクロールバック（カーソル直下のペイン）
 - スプリッターをドラッグ → 分割比の変更
 - タブをペインの上下左右の辺付近へドラッグ → そこにドッキング（タブの中身ごとペインとして合流）
@@ -63,9 +69,34 @@ cargo run
 
 ## 今後の予定
 
-- [ ] Cmd+C / Cmd+V のクリップボード対応
-- [ ] テキスト選択
+- [x] Cmd+C / Cmd+V のクリップボード対応
+- [x] テキスト選択
 - [ ] OS9風スクロールバー
 - [ ] カラプスボックスでのウィンドウシェード（現在は最小化）
 - [ ] ベルのビジュアルフラッシュ
 - [ ] ビットマップ風レンダリング（アンチエイリアス無効）オプション
+
+## Syntax highlight
+
+Homebrew導入済みのmacOSで、初回に実行:
+
+```sh
+python3 scripts/setup-highlighting.py
+```
+
+batとzsh-syntax-highlightingをインストールし、連携スクリプトを
+~/.config/os9terminal/integration.zshへ配置、.zshrcの末尾に読み込みを追加する。
+既存.zshrcは初回変更時に.zshrc.os9terminal-backupへ保存する。
+ZDOTDIRを使う場合は同じ環境変数を指定して実行する。
+
+新しいタブを開くと、zshの入力中のコマンド・文字列などが色分けされる。
+ファイルは `bat src/main.rs`、ページ送りなしなら
+`bat --paging=never src/main.rs` で表示する。
+batのANSIテーマを既定にし、端末の配色に追従する（既存BAT_THEME設定は優先）。
+この連携は0s9terminalの対話zsh内でのみ有効。
+catや他のコマンドの出力は自動で構文解析しない。
+
+解除する場合は.zshrc末尾の0s9terminal読み込み行を削除する。
+
+参照: [zsh-syntax-highlighting](https://github.com/zsh-users/zsh-syntax-highlighting/blob/master/INSTALL.md)、
+[bat](https://github.com/sharkdp/bat)。
