@@ -13,6 +13,10 @@ ROOT = Path(__file__).resolve().parent.parent
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
 
+icon = ROOT / "assets/o9term.icns"
+if not icon.is_file():
+    raise SystemExit(
+        f"Missing app icon: {icon}. Generate it with python3 scripts/generate-icon.py.")
 version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
 name = f"o9term-{version}-macos-{platform.machine()}"
 stage = ROOT / "dist" / name
@@ -38,6 +42,7 @@ libs = contents / "Frameworks"
 for directory in (macos, resources / "bin", libs, resources / "licenses"):
     directory.mkdir(parents=True, exist_ok=True)
 shutil.copy2(ROOT / "target/release/os9terminal", macos / "os9terminal")
+shutil.copy2(icon, resources / "o9term.icns")
 shutil.copy2(prefix / "bin/bat", resources / "bin/bat")
 shutil.copytree(prefix / "share/zsh-syntax-highlighting", resources / "zsh-syntax-highlighting")
 shutil.copy2(ROOT / "shell/integration.zsh", resources / "integration.zsh")
@@ -88,6 +93,7 @@ with (contents / "Info.plist").open("wb") as stream:
         "CFBundleIdentifier": "io.github.aberyotaro.o9term",
         "CFBundleName": "o9term",
         "CFBundleDisplayName": "o9term",
+        "CFBundleIconFile": "o9term.icns",
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,

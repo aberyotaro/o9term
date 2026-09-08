@@ -29,6 +29,19 @@ Subsequent updates require moving that previous backup first.
 For uninstallation, remove the app and launcher, then remove the integration
 line in .zshrc. The installer also adds ~/.local/bin to .zprofile.
 
+## App icon
+
+The icon artwork is defined in `scripts/generate-icon.py`. Regenerate the
+committed `assets/o9term.icns` and 1024-pixel `assets/o9term.png` preview on macOS:
+
+```sh
+python3 scripts/generate-icon.py
+```
+
+The generator uses Python's standard library and macOS `iconutil`. Packaging
+requires the generated ICNS file and includes it in the app bundle before signing
+so Finder, the Dock and the app switcher can display it.
+
 ## GitHub Releases
 
 Distribution repository: https://github.com/aberyotaro/o9term
