@@ -11,7 +11,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use fontdue::{Font, FontSettings, Metrics};
 
 use crate::ime::Preedit;
-use crate::tabs::{SplitDir, SplitterHit};
+use crate::panes::{SplitDir, SplitterHit};
 use crate::term::EventProxy;
 use crate::theme::{self, Scheme};
 
@@ -132,14 +132,12 @@ pub struct Layout {
     pub close_box: Rect,
     pub zoom_box: Rect,
     pub collapse_box: Rect,
-    /// タブが2枚以上、またはペインが分割されているときに表示する。
-    pub tab_bar: Option<Rect>,
     pub content: Rect,
     pub grow_box: Rect,
 }
 
 impl Layout {
-    pub fn compute(width: u32, height: u32, scale: f64, show_tabs: bool) -> Self {
+    pub fn compute(width: u32, height: u32, scale: f64) -> Self {
         let s = |v: f32| ((v as f64 * scale).round() as i32).max(1);
         let (w, h) = (width as i32, height as i32);
 
@@ -153,14 +151,7 @@ impl Layout {
         let collapse_box = Rect { x: w - f - s(6.0) - box_sz, y: box_y, w: box_sz, h: box_sz };
         let zoom_box = Rect { x: collapse_box.x - s(4.0) - box_sz, y: box_y, w: box_sz, h: box_sz };
 
-        let mut top = f + tb_h + s(1.0); // タイトルバー + 区切り線の下端
-        let tab_bar = if show_tabs {
-            let bar = Rect { x: f, y: top, w: w - 2 * f, h: s(24.0) };
-            top = bar.bottom();
-            Some(bar)
-        } else {
-            None
-        };
+        let top = f + tb_h + s(1.0); // タイトルバー + 区切り線の下端
 
         let pad = s(4.0);
         let inset = f + pad + s(1.0); // フレーム + 余白 + 内側ベベル
@@ -174,28 +165,8 @@ impl Layout {
         let gs = s(15.0);
         let grow_box = Rect { x: w - f - gs - s(2.0), y: h - f - gs - s(2.0), w: gs, h: gs };
 
-        Self { titlebar, close_box, zoom_box, collapse_box, tab_bar, content, grow_box }
+        Self { titlebar, close_box, zoom_box, collapse_box, content, grow_box }
     }
-}
-
-/// タブバー内の各タブと「+」ボタンの配置。描画とヒットテストで共用する。
-pub fn tab_layout(bar: Rect, n: usize, scale: f64) -> (Vec<Rect>, Rect) {
-    let s = |v: f32| ((v as f64 * scale).round() as i32).max(1);
-    let margin = s(6.0);
-    let gap = s(3.0);
-    let plus_w = s(17.0);
-    let n = n.max(1);
-    let avail = bar.w - 2 * margin - plus_w - gap * n as i32;
-    let tw = (avail / n as i32).clamp(s(40.0), s(160.0));
-
-    let mut rects = Vec::with_capacity(n);
-    let mut x = bar.x + margin;
-    for _ in 0..n {
-        rects.push(Rect { x, y: bar.y + s(4.0), w: tw, h: bar.h - s(4.0) });
-        x += tw + gap;
-    }
-    let plus = Rect { x, y: bar.y + (bar.h - plus_w) / 2, w: plus_w, h: plus_w };
-    (rects, plus)
 }
 
 pub struct Renderer {
@@ -251,7 +222,7 @@ impl Renderer {
         }
     }
 
-    /// ウィンドウクローム (フレーム・タイトルバー・タブバー) を描画する。
+    /// ウィンドウクローム (フレーム・タイトルバー) を描画する。
     /// ペインとスプリッターは呼び出し側がこの後に個別に描く。
     pub fn draw_chrome(
         &mut self,
@@ -260,7 +231,6 @@ impl Renderer {
         height: u32,
         layout: &Layout,
         title: &str,
-        tabs: &[(String, bool)],
         focused: bool,
     ) {
         let (w, h) = (width as i32, height as i32);
@@ -277,84 +247,6 @@ impl Renderer {
         fill_rect(buf, w, h, w - 2 * e, e, e, h - 2 * e, theme::BEVEL_DARK);
 
         self.draw_titlebar(buf, w, h, layout, title, focused);
-
-        if let Some(bar) = layout.tab_bar {
-            self.draw_tab_bar(buf, w, h, bar, tabs, focused);
-        }
-    }
-
-    /// 角形の Platinum 風タブバー。アクティブタブは下辺の境界線を消して
-    /// コンテンツ側と地続きに見せる。
-    fn draw_tab_bar(
-        &mut self,
-        buf: &mut [u32],
-        w: i32,
-        h: i32,
-        bar: Rect,
-        tabs: &[(String, bool)],
-        focused: bool,
-    ) {
-        let scale = self.scale;
-        let s = move |v: f32| ((v as f64 * scale).round() as i32).max(1);
-        let e = s(1.0);
-
-        fill_rect(buf, w, h, bar.x, bar.y, bar.w, bar.h, theme::TAB_BAR_BG);
-        let (rects, plus) = tab_layout(bar, tabs.len(), self.scale);
-
-        // 非アクティブタブ (境界線の下に沈む)
-        for (rect, (label, active)) in rects.iter().zip(tabs) {
-            if *active {
-                continue;
-            }
-            let r = *rect;
-            fill_rect(buf, w, h, r.x, r.y, r.w, r.h, theme::TAB_INACTIVE);
-            stroke_rect(buf, w, h, r.x, r.y, r.w, r.h, e, theme::TAB_BORDER);
-            self.draw_tab_label(buf, w, h, label, r, theme::TITLE_TEXT_INACTIVE);
-        }
-
-        // タブバー下端の境界線
-        fill_rect(buf, w, h, bar.x, bar.bottom() - e, bar.w, e, theme::SEPARATOR);
-
-        // アクティブタブ (少し背が高く、下辺の線を上書きして消す)
-        for (rect, (label, active)) in rects.iter().zip(tabs) {
-            if !*active {
-                continue;
-            }
-            let r = Rect { x: rect.x, y: bar.y + s(2.0), w: rect.w, h: bar.h - s(2.0) };
-            fill_rect(buf, w, h, r.x, r.y, r.w, r.h, theme::FRAME);
-            // 左・上・右のみ線を引く (下は開けて地続きに)
-            fill_rect(buf, w, h, r.x, r.y, e, r.h, theme::TAB_BORDER);
-            fill_rect(buf, w, h, r.x, r.y, r.w, e, theme::TAB_BORDER);
-            fill_rect(buf, w, h, r.right() - e, r.y, e, r.h, theme::TAB_BORDER);
-            // 内側ハイライト
-            fill_rect(buf, w, h, r.x + e, r.y + e, r.w - 2 * e, e, theme::BEVEL_LIGHT);
-            fill_rect(buf, w, h, r.x + e, r.y + e, e, r.h - e, theme::BEVEL_LIGHT);
-            let color = if focused { theme::TITLE_TEXT } else { theme::TITLE_TEXT_INACTIVE };
-            self.draw_tab_label(buf, w, h, label, r, color);
-        }
-
-        // 「+」ボタン (新規タブ)
-        fill_rect(buf, w, h, plus.x, plus.y, plus.w, plus.h, theme::BOX_FILL);
-        stroke_rect(buf, w, h, plus.x, plus.y, plus.w, plus.h, e, theme::TAB_BORDER);
-        let (cx, cy) = plus.center();
-        let arm = s(4.0);
-        fill_rect(buf, w, h, cx - arm, cy, arm * 2 + e, e, theme::BOX_BORDER);
-        fill_rect(buf, w, h, cx, cy - arm, e, arm * 2 + e, theme::BOX_BORDER);
-    }
-
-    fn draw_tab_label(&mut self, buf: &mut [u32], w: i32, h: i32, label: &str, r: Rect, color: u32) {
-        let scale = self.scale;
-        let s = move |v: f32| ((v as f64 * scale).round() as i32).max(1);
-        let label_w = self.measure_title(label);
-        let x = if label_w < r.w - 2 * s(4.0) { r.x + (r.w - label_w) / 2 } else { r.x + s(4.0) };
-        let ascent = self
-            .title_font
-            .horizontal_line_metrics(self.title_px)
-            .map(|m| m.ascent)
-            .unwrap_or(8.0);
-        let baseline = r.y + r.h / 2 + (ascent / 2.0).round() as i32 - s(1.0);
-        let clip = Rect { x: r.x + s(2.0), y: r.y, w: r.w - s(4.0), h: r.h };
-        self.draw_title_text(buf, w, h, label, x, baseline, color, clip);
     }
 
     /// ペイン1枚 (窪んだベベル + 白地 + 端末グリッド) を描画する。
@@ -618,17 +510,11 @@ impl Renderer {
         }
     }
 
-    /// タブドラッグ中のドロップ先プレビュー枠。
+    /// ペインドラッグ中のドロップ先プレビュー枠。
     pub fn draw_drop_outline(&self, buf: &mut [u32], width: u32, height: u32, r: Rect) {
         let (w, h) = (width as i32, height as i32);
         let t = ((2.0 * self.scale).round() as i32).max(2);
         stroke_rect(buf, w, h, r.x, r.y, r.w, r.h, t, theme::DROP_HINT);
-    }
-
-    /// タブ並べ替え時の挿入位置バー。
-    pub fn draw_drop_bar(&self, buf: &mut [u32], width: u32, height: u32, r: Rect) {
-        let (w, h) = (width as i32, height as i32);
-        fill_rect(buf, w, h, r.x, r.y, r.w, r.h, theme::DROP_HINT);
     }
 
     /// 設定ウィンドウの中身 (カラースキーマのラジオボタン一覧) を描画し、

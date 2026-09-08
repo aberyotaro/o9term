@@ -6,12 +6,27 @@ Develop with `cargo run`; validate with `cargo test`.
 
 `src/main.rs` coordinates independent terminal windows in one event loop and
 routes events by window or globally unique pane ID. `src/terminal_window.rs`
-owns each window's tabs, input, rendering and settings. Cmd+N inherits the
-focused pane's working directory; each PTY receives its own startup directory
-without changing the application process's working directory.
+owns each window's single pane tree, input, rendering and settings.
+`src/panes.rs` handles the tree's layout, splitting, movement and removal.
+Cmd+N inherits the focused pane's working directory; each PTY receives its own
+startup directory without changing the application process's working directory.
 
-Closing a window, its final tab or its final shell leaves the other windows
-running. Cmd+Q closes the entire app; closing all terminal windows also exits.
+Cmd+W closes the current window and all of its panes. Cmd+Shift+W closes only
+the focused pane. Closing a window, its final pane or its final shell leaves
+the other windows running. Cmd+Q closes the entire app; closing all terminal
+windows also exits.
+
+## Pane controls
+
+Cmd+Control+an arrow key splits the focused pane and places a new pane in that
+direction. The new pane inherits the source pane's working directory and receives
+focus. Cmd+D (right) and Cmd+Shift+D (down) remain available. Splitting is operated
+through shortcuts; there are no split buttons in the window.
+
+Cmd+Option+an arrow key moves focus between panes. Cmd-drag moves a pane to an
+edge of another pane in the same window, preserving its PTY. Dragging a divider
+resizes the adjacent panes. IME composition remains tied to the focused pane and
+is cancelled when focus moves.
 
 ## Build a release package (maintainers only)
 

@@ -24,4 +24,4 @@ if line not in content:
         shutil.copy2(rc, backup)
     with rc.open("a") as stream:
         stream.write("\n# 0s9terminal syntax highlighting (keep at end)\n" + line + "\n")
-print("Installed. Open a new 0s9terminal tab to enable highlighting.")
+print("Installed. Open a new o9term window to enable highlighting.")

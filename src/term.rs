@@ -149,7 +149,7 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        // ペインやタブを閉じたとき、PTY の読み書きスレッドを確実に止める
+        // ペインやウィンドウを閉じたとき、PTY の読み書きスレッドを確実に止める
         self.shutdown();
     }
 }

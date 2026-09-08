@@ -6,7 +6,7 @@ mod ime;
 #[cfg(target_os = "macos")]
 mod instance;
 mod renderer;
-mod tabs;
+mod panes;
 mod term;
 mod terminal_window;
 mod theme;

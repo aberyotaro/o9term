@@ -13,10 +13,7 @@ pub const TITLE_TEXT: u32 = 0x000000;
 pub const TITLE_TEXT_INACTIVE: u32 = 0x888888;
 pub const BOX_FILL: u32 = 0xDDDDDD; // クローズボックス等の地色
 pub const BOX_BORDER: u32 = 0x333333;
-pub const TAB_BAR_BG: u32 = 0xC2C2C2; // タブバーの地色
-pub const TAB_INACTIVE: u32 = 0xADADAD; // 非アクティブタブ
-pub const TAB_BORDER: u32 = 0x444444;
-pub const DROP_HINT: u32 = 0x555555; // タブドラッグ中のドロップ先プレビュー
+pub const DROP_HINT: u32 = 0x555555; // ペインドラッグ中のドロップ先プレビュー
 pub const SUNKEN_DARK: u32 = 0x808080; // コンテンツ領域の窪み(左上)
 pub const SUNKEN_LIGHT: u32 = 0xFFFFFF; // コンテンツ領域の窪み(右下)
 
