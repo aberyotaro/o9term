@@ -4,9 +4,9 @@
 use crate::renderer::Rect;
 use crate::term::{PaneId, Terminal};
 
-pub struct Pane {
+pub struct Pane<T = Terminal> {
     pub id: PaneId,
-    pub terminal: Terminal,
+    pub terminal: T,
     pub title: String,
 }
 
@@ -17,11 +17,11 @@ pub enum SplitDir {
     Horizontal,
 }
 
-pub enum PaneNode {
+pub enum PaneNode<T = Terminal> {
     /// 一時的なプレースホルダ (木の組み替え中のみ)
     Empty,
-    Leaf(Pane),
-    Split { dir: SplitDir, ratio: f32, first: Box<PaneNode>, second: Box<PaneNode> },
+    Leaf(Pane<T>),
+    Split { dir: SplitDir, ratio: f32, first: Box<PaneNode<T>>, second: Box<PaneNode<T>> },
 }
 
 /// スプリッターのヒットテスト・描画用情報。
@@ -34,7 +34,7 @@ pub struct SplitterHit {
     pub rect: Rect,
 }
 
-impl PaneNode {
+impl<T> PaneNode<T> {
     /// 矩形を再帰的に分配し、ペインとスプリッターの配置を計算する。
     pub fn layout(
         &self,
@@ -106,7 +106,7 @@ impl PaneNode {
     }
 
     /// `id` の葉を分割し、新しいペインを後側 (右/下) に配置する。
-    pub fn split_pane(&mut self, id: PaneId, dir: SplitDir, new_pane: &mut Option<Pane>) -> bool {
+    pub fn split_pane(&mut self, id: PaneId, dir: SplitDir, new_pane: &mut Option<Pane<T>>) -> bool {
         match self {
             PaneNode::Leaf(pane) if pane.id == id => {
                 let Some(new_pane) = new_pane.take() else { return false };
@@ -133,7 +133,7 @@ impl PaneNode {
         target: PaneId,
         dir: SplitDir,
         before: bool,
-        subtree: &mut Option<PaneNode>,
+        subtree: &mut Option<PaneNode<T>>,
     ) -> bool {
         match self {
             PaneNode::Leaf(pane) if pane.id == target => {
@@ -156,27 +156,42 @@ impl PaneNode {
         }
     }
 
-    /// `id` の葉を取り除き、親の分割ノードをもう片方の子で置き換える。
-    /// ルートが対象の葉そのものである場合は呼び出し側でタブごと閉じること。
-    pub fn remove_pane(&mut self, id: PaneId) -> bool {
-        if let PaneNode::Split { first, second, .. } = self {
-            if matches!(&**first, PaneNode::Leaf(p) if p.id == id) {
-                let other = std::mem::replace(&mut **second, PaneNode::Empty);
-                *self = other;
-                return true;
+    /// 葉を所有権ごと取り出し、空いた分割を縮約する。PTY は停止しない。
+    pub fn take_pane(&mut self, id: PaneId) -> Option<Pane<T>> {
+        match self {
+            PaneNode::Leaf(pane) if pane.id == id => {
+                match std::mem::replace(self, PaneNode::Empty) {
+                    PaneNode::Leaf(pane) => Some(pane),
+                    _ => unreachable!(),
+                }
             }
-            if matches!(&**second, PaneNode::Leaf(p) if p.id == id) {
-                let other = std::mem::replace(&mut **first, PaneNode::Empty);
-                *self = other;
-                return true;
+            PaneNode::Split { first, second, .. } => {
+                let pane = first.take_pane(id).or_else(|| second.take_pane(id))?;
+                if matches!(**first, PaneNode::Empty) {
+                    *self = std::mem::replace(&mut **second, PaneNode::Empty);
+                } else if matches!(**second, PaneNode::Empty) {
+                    *self = std::mem::replace(&mut **first, PaneNode::Empty);
+                }
+                Some(pane)
             }
-            first.remove_pane(id) || second.remove_pane(id)
-        } else {
-            false
+            _ => None,
         }
     }
 
-    pub fn find_pane(&self, id: PaneId) -> Option<&Pane> {
+    /// `id` のペインを閉じ、残った木を縮約する。
+    pub fn remove_pane(&mut self, id: PaneId) -> bool {
+        self.take_pane(id).is_some()
+    }
+
+    pub fn pane_count(&self) -> usize {
+        match self {
+            PaneNode::Empty => 0,
+            PaneNode::Leaf(_) => 1,
+            PaneNode::Split { first, second, .. } => first.pane_count() + second.pane_count(),
+        }
+    }
+
+    pub fn find_pane(&self, id: PaneId) -> Option<&Pane<T>> {
         match self {
             PaneNode::Leaf(pane) if pane.id == id => Some(pane),
             PaneNode::Split { first, second, .. } => {
@@ -186,7 +201,7 @@ impl PaneNode {
         }
     }
 
-    pub fn first_pane(&self) -> Option<&Pane> {
+    pub fn first_pane(&self) -> Option<&Pane<T>> {
         match self {
             PaneNode::Leaf(pane) => Some(pane),
             PaneNode::Split { first, second, .. } => {
@@ -201,7 +216,7 @@ impl PaneNode {
     }
 
     /// 全ペインに対して処理を実行する。
-    pub fn for_each_pane_mut(&mut self, f: &mut impl FnMut(&mut Pane)) {
+    pub fn for_each_pane_mut(&mut self, f: &mut impl FnMut(&mut Pane<T>)) {
         match self {
             PaneNode::Leaf(pane) => f(pane),
             PaneNode::Split { first, second, .. } => {
@@ -218,13 +233,13 @@ impl PaneNode {
     }
 }
 
-pub struct Tab {
-    pub root: PaneNode,
+pub struct Tab<T = Terminal> {
+    pub root: PaneNode<T>,
     pub focused: PaneId,
 }
 
-impl Tab {
-    pub fn new(pane: Pane) -> Self {
+impl<T> Tab<T> {
+    pub fn new(pane: Pane<T>) -> Self {
         Self { focused: pane.id, root: PaneNode::Leaf(pane) }
     }
 
@@ -244,5 +259,229 @@ impl Tab {
             Some(last) if !last.is_empty() => last.to_string(),
             _ => title.to_string(),
         }
+    }
+}
+
+/// ペインを同じタブ、または別タブの葉の隣へ移す。
+/// 移動前に両端を検証するため、無効なドロップでも PTY を失わない。
+pub fn move_pane<T>(
+    tabs: &mut Vec<Tab<T>>,
+    source: PaneId,
+    target: PaneId,
+    dir: SplitDir,
+    before: bool,
+) -> Option<usize> {
+    if source == target {
+        return None;
+    }
+    let from = tabs.iter().position(|tab| tab.root.contains(source))?;
+    let mut to = tabs.iter().position(|tab| tab.root.contains(target))?;
+    let pane = tabs[from].root.take_pane(source)?;
+    if tabs[from].root.pane_count() == 0 {
+        tabs.remove(from);
+        if from < to {
+            to -= 1;
+        }
+    } else if tabs[from].focused == source {
+        tabs[from].focused = tabs[from].root.first_pane().unwrap().id;
+    }
+    let mut carrier = Some(PaneNode::Leaf(pane));
+    let inserted = tabs[to].root.dock_subtree(target, dir, before, &mut carrier);
+    // The destination leaf was validated and cannot be removed with another leaf.
+    debug_assert!(inserted);
+    tabs[to].focused = source;
+    Some(to)
+}
+
+/// 分割ペインを新しいタブに戻す。挿入位置は移動前のタブの並びで指定する。
+pub fn detach_pane<T>(tabs: &mut Vec<Tab<T>>, source: PaneId, position: usize) -> Option<usize> {
+    let from = tabs.iter().position(|tab| tab.root.contains(source))?;
+    if tabs[from].root.is_leaf_of(source) {
+        return None;
+    }
+    let pane = tabs[from].root.take_pane(source)?;
+    if tabs[from].focused == source {
+        tabs[from].focused = tabs[from].root.first_pane().unwrap().id;
+    }
+    let position = position.min(tabs.len());
+    tabs.insert(position, Tab::new(pane));
+    Some(position)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A stand-in owned resource lets tree tests detect accidental terminal shutdown.
+    struct Session {
+        id: PaneId,
+        closed: Rc<RefCell<Vec<PaneId>>>,
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            self.closed.borrow_mut().push(self.id);
+        }
+    }
+
+    fn pane(id: PaneId, closed: &Rc<RefCell<Vec<PaneId>>>) -> Pane<Session> {
+        Pane {
+            id,
+            terminal: Session { id, closed: closed.clone() },
+            title: format!("/session/{id}"),
+        }
+    }
+
+    fn leaf(id: PaneId, closed: &Rc<RefCell<Vec<PaneId>>>) -> PaneNode<Session> {
+        PaneNode::Leaf(pane(id, closed))
+    }
+
+    fn split(dir: SplitDir, ratio: f32, first: PaneNode<Session>, second: PaneNode<Session>) -> PaneNode<Session> {
+        PaneNode::Split { dir, ratio, first: Box::new(first), second: Box::new(second) }
+    }
+
+    fn nested(closed: &Rc<RefCell<Vec<PaneId>>>) -> Tab<Session> {
+        Tab {
+            focused: 2,
+            root: split(
+                SplitDir::Horizontal,
+                0.35,
+                split(SplitDir::Vertical, 0.25, leaf(1, closed), leaf(2, closed)),
+                split(SplitDir::Vertical, 0.7, leaf(3, closed), leaf(4, closed)),
+            ),
+        }
+    }
+
+    fn ids(node: &PaneNode<Session>) -> Vec<PaneId> {
+        match node {
+            PaneNode::Leaf(pane) => vec![pane.id],
+            PaneNode::Split { first, second, .. } => {
+                let mut all = ids(first);
+                all.extend(ids(second));
+                all
+            }
+            PaneNode::Empty => panic!("Empty nodes must not survive a completed move"),
+        }
+    }
+
+    fn assert_valid(tabs: &[Tab<Session>], expected: &[PaneId]) {
+        let mut all = Vec::new();
+        for tab in tabs {
+            assert!(tab.root.contains(tab.focused), "focus must name a remaining pane");
+            all.extend(ids(&tab.root));
+        }
+        all.sort_unstable();
+        assert_eq!(all, expected, "a move must preserve all panes exactly once");
+    }
+
+    #[test]
+    fn moving_nested_leaf_collapses_parent_and_preserves_sessions_and_ratios() {
+        let closed = Rc::new(RefCell::new(Vec::new()));
+        let mut tabs = vec![nested(&closed)];
+        assert_eq!(move_pane(&mut tabs, 2, 3, SplitDir::Horizontal, false), Some(0));
+        assert_valid(&tabs, &[1, 2, 3, 4]);
+        assert_eq!(ids(&tabs[0].root), [1, 3, 2, 4]);
+        assert_eq!(tabs[0].focused, 2);
+        let moved = tabs[0].root.find_pane(2).unwrap();
+        assert_eq!(moved.terminal.id, 2);
+        assert_eq!(moved.title, "/session/2");
+        let PaneNode::Split { ratio, first, second, .. } = &tabs[0].root else { panic!() };
+        assert_eq!(*ratio, 0.35);
+        assert!(first.is_leaf_of(1));
+        let PaneNode::Split { ratio, first, .. } = &**second else { panic!() };
+        assert_eq!(*ratio, 0.7);
+        assert!(matches!(&**first, PaneNode::Split { dir: SplitDir::Horizontal, .. }));
+        assert!(closed.borrow().is_empty());
+    }
+
+    #[test]
+    fn moving_next_to_sibling_rebuilds_only_that_split() {
+        let closed = Rc::new(RefCell::new(Vec::new()));
+        let mut tabs = vec![nested(&closed)];
+        assert_eq!(move_pane(&mut tabs, 2, 1, SplitDir::Horizontal, true), Some(0));
+        assert_valid(&tabs, &[1, 2, 3, 4]);
+        assert_eq!(ids(&tabs[0].root), [2, 1, 3, 4]);
+        assert!(closed.borrow().is_empty());
+    }
+
+    #[test]
+    fn moving_last_pane_between_tabs_removes_empty_tab_in_either_direction() {
+        for source_first in [true, false] {
+            let closed = Rc::new(RefCell::new(Vec::new()));
+            let mut tabs = vec![Tab::new(pane(5, &closed)), nested(&closed)];
+            if !source_first {
+                tabs.reverse();
+            }
+            assert_eq!(move_pane(&mut tabs, 5, 3, SplitDir::Vertical, true), Some(0));
+            assert_eq!(tabs.len(), 1);
+            assert_valid(&tabs, &[1, 2, 3, 4, 5]);
+            assert_eq!(tabs[0].focused, 5);
+            assert_eq!(ids(&tabs[0].root), [1, 2, 5, 3, 4]);
+            assert!(closed.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn moving_focused_pane_to_another_tab_repairs_both_foci() {
+        let closed = Rc::new(RefCell::new(Vec::new()));
+        let mut tabs = vec![nested(&closed), Tab::new(pane(5, &closed))];
+        assert_eq!(move_pane(&mut tabs, 2, 5, SplitDir::Vertical, false), Some(1));
+        assert_valid(&tabs, &[1, 2, 3, 4, 5]);
+        assert_eq!(tabs[0].focused, 1);
+        assert_eq!(tabs[1].focused, 2);
+        assert!(closed.borrow().is_empty());
+    }
+
+    #[test]
+    fn detaching_to_tab_bar_preserves_session_and_repairs_source_focus() {
+        let closed = Rc::new(RefCell::new(Vec::new()));
+        let mut tabs = vec![nested(&closed)];
+        assert_eq!(detach_pane(&mut tabs, 2, 0), Some(0));
+        assert_valid(&tabs, &[1, 2, 3, 4]);
+        assert_eq!(ids(&tabs[0].root), [2]);
+        assert_eq!(ids(&tabs[1].root), [1, 3, 4]);
+        assert_eq!(tabs[0].title(), "/session/2");
+        assert_eq!(tabs[1].focused, 1);
+        assert!(closed.borrow().is_empty());
+    }
+
+    #[test]
+    fn detaching_background_pane_keeps_focus_and_clamps_insertion() {
+        let closed = Rc::new(RefCell::new(Vec::new()));
+        let mut tabs = vec![nested(&closed)];
+        assert_eq!(detach_pane(&mut tabs, 3, 99), Some(1));
+        assert_valid(&tabs, &[1, 2, 3, 4]);
+        assert_eq!(tabs[0].focused, 2);
+        assert_eq!(ids(&tabs[1].root), [3]);
+        assert!(closed.borrow().is_empty());
+    }
+
+    #[test]
+    fn invalid_moves_leave_all_sessions_and_layout_untouched() {
+        let closed = Rc::new(RefCell::new(Vec::new()));
+        let mut tabs = vec![nested(&closed), Tab::new(pane(5, &closed))];
+        for (source, target) in [(2, 2), (9, 2), (2, 9)] {
+            assert_eq!(move_pane(&mut tabs, source, target, SplitDir::Vertical, false), None);
+        }
+        assert_eq!(detach_pane(&mut tabs, 9, 0), None);
+        assert_eq!(detach_pane(&mut tabs, 5, 0), None);
+        assert_valid(&tabs, &[1, 2, 3, 4, 5]);
+        assert_eq!(ids(&tabs[0].root), [1, 2, 3, 4]);
+        assert_eq!(tabs[0].focused, 2);
+        assert!(closed.borrow().is_empty());
+    }
+
+    #[test]
+    fn closing_after_moves_shuts_down_only_the_chosen_session() {
+        let closed = Rc::new(RefCell::new(Vec::new()));
+        let mut tabs = vec![nested(&closed)];
+        move_pane(&mut tabs, 2, 3, SplitDir::Horizontal, false);
+        assert!(tabs[0].root.remove_pane(3));
+        assert_eq!(*closed.borrow(), [3]);
+        assert_valid(&tabs, &[1, 2, 4]);
+        assert!(!tabs[0].root.remove_pane(9));
+        assert_eq!(*closed.borrow(), [3]);
     }
 }

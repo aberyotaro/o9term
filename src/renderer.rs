@@ -4,11 +4,13 @@
 use std::collections::HashMap;
 
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{self, Term};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use fontdue::{Font, FontSettings, Metrics};
 
+use crate::ime::Preedit;
 use crate::tabs::{SplitDir, SplitterHit};
 use crate::term::EventProxy;
 use crate::theme::{self, Scheme};
@@ -50,6 +52,79 @@ impl Rect {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ScrollbarPart {
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Thumb,
+}
+
+/// 描画と操作が共用するスクロールバー。offset は最下部を 0 とする。
+#[derive(Copy, Clone, Debug)]
+pub struct ScrollbarLayout {
+    pub bounds: Rect,
+    pub up: Rect,
+    pub down: Rect,
+    pub track: Rect,
+    pub thumb: Rect,
+    pub history_size: usize,
+}
+
+impl ScrollbarLayout {
+    pub fn compute(pane: Rect, scale: f64, history_size: usize, screen_lines: usize, offset: usize) -> Self {
+        let s = |v: f64| ((v * scale).round() as i32).max(1);
+        let edge = s(1.0);
+        let width = s(16.0).min((pane.w - 2 * edge).max(0));
+        let bounds = Rect {
+            x: pane.right() - edge - width,
+            y: pane.y + edge,
+            w: width,
+            h: (pane.h - 2 * edge).max(0),
+        };
+        let arrow_h = s(16.0).min(bounds.h / 2);
+        let up = Rect { h: arrow_h, ..bounds };
+        let down = Rect { y: bounds.bottom() - arrow_h, h: arrow_h, ..bounds };
+        let track = Rect { y: up.bottom(), h: (bounds.h - 2 * arrow_h).max(0), ..bounds };
+        let total = history_size.saturating_add(screen_lines).max(1);
+        let fraction = screen_lines as f64 / total as f64;
+        let thumb_h = ((track.h as f64 * fraction).round() as i32)
+            .max(s(18.0)).min(track.h);
+        let travel = track.h - thumb_h;
+        let fraction = if history_size == 0 { 1.0 } else {
+            1.0 - offset.min(history_size) as f64 / history_size as f64
+        };
+        let thumb = Rect { y: track.y + (travel as f64 * fraction).round() as i32, h: thumb_h, ..track };
+        Self { bounds, up, down, track, thumb, history_size }
+    }
+
+    pub fn hit_test(&self, x: f64, y: f64) -> Option<ScrollbarPart> {
+        if !self.bounds.contains(x, y) {
+            None
+        } else if self.up.contains(x, y) {
+            Some(ScrollbarPart::Up)
+        } else if self.down.contains(x, y) {
+            Some(ScrollbarPart::Down)
+        } else if self.thumb.contains(x, y) {
+            Some(ScrollbarPart::Thumb)
+        } else if y < self.thumb.y as f64 {
+            Some(ScrollbarPart::PageUp)
+        } else {
+            Some(ScrollbarPart::PageDown)
+        }
+    }
+
+    pub fn offset_for_thumb_top(&self, y: f64) -> usize {
+        let travel = self.track.h - self.thumb.h;
+        if travel <= 0 || self.history_size == 0 {
+            return 0;
+        }
+        let position = ((y - self.track.y as f64) / travel as f64).clamp(0.0, 1.0);
+        ((1.0 - position) * self.history_size as f64).round() as usize
+    }
+}
+
 /// ウィンドウ内の各パーツの配置 (物理ピクセル)。描画とヒットテストで共用する。
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Layout {
@@ -57,7 +132,7 @@ pub struct Layout {
     pub close_box: Rect,
     pub zoom_box: Rect,
     pub collapse_box: Rect,
-    /// タブが2枚以上のときだけ存在する
+    /// タブが2枚以上、またはペインが分割されているときに表示する。
     pub tab_bar: Option<Rect>,
     pub content: Rect,
     pub grow_box: Rect,
@@ -90,8 +165,11 @@ impl Layout {
         let pad = s(4.0);
         let inset = f + pad + s(1.0); // フレーム + 余白 + 内側ベベル
         let top = top + pad + s(1.0);
-        let content =
-            Rect { x: inset, y: top, w: (w - 2 * inset).max(0), h: (h - top - inset).max(0) };
+        // リサイズボックス用の下枠を確保し、スクロールバーの下矢印と重ねない。
+        let content = Rect {
+            x: inset, y: top, w: (w - 2 * inset).max(0),
+            h: (h - top - inset - s(16.0)).max(0),
+        };
 
         let gs = s(15.0);
         let grow_box = Rect { x: w - f - gs - s(2.0), y: h - f - gs - s(2.0), w: gs, h: gs };
@@ -130,6 +208,8 @@ pub struct Renderer {
     pub cell_h: usize,
     ascent: i32,
     pub scale: f64,
+    /// True のときグリフを二値化し、ビットマップ風の輪郭で描く。
+    pub bitmap_text: bool,
     glyphs: HashMap<char, (Metrics, Vec<u8>)>,
     title_glyphs: HashMap<char, (Metrics, Vec<u8>)>,
 }
@@ -165,6 +245,7 @@ impl Renderer {
             cell_h,
             ascent,
             scale,
+            bitmap_text: false,
             glyphs: HashMap::new(),
             title_glyphs: HashMap::new(),
         }
@@ -300,6 +381,7 @@ impl Renderer {
         fill_rect(buf, w, h, rect.x + e, rect.y + e, rect.w - 2 * e, rect.h - 2 * e, scheme.bg);
 
         self.draw_grid(buf, w, h, self.grid_rect(rect), term, active, scheme);
+        self.draw_scrollbar(buf, width, height, &self.scrollbar_layout(rect, term));
     }
 
     /// ペイン矩形から実際に文字グリッドを置く領域 (ベベル+余白の内側) を求める。
@@ -309,9 +391,119 @@ impl Renderer {
         Rect {
             x: pane.x + inset,
             y: pane.y + inset,
-            w: (pane.w - 2 * inset).max(0),
+            w: (pane.w - 2 * inset - s(16.0)).max(0),
             h: (pane.h - 2 * inset).max(0),
         }
+    }
+
+    pub fn scrollbar_layout(&self, pane: Rect, term: &Term<EventProxy>) -> ScrollbarLayout {
+        let grid = term.grid();
+        ScrollbarLayout::compute(pane, self.scale, grid.history_size(), grid.screen_lines(), grid.display_offset())
+    }
+
+    fn draw_scrollbar(&self, buf: &mut [u32], width: u32, height: u32, bar: &ScrollbarLayout) {
+        let (w, h) = (width as i32, height as i32);
+        let s = |v: f64| ((v * self.scale).round() as i32).max(1);
+        let e = s(1.0);
+        let track = bar.track;
+        fill_rect(buf, w, h, track.x, track.y, track.w, track.h, theme::FRAME);
+        // グレーの網掛けトラック。
+        for y in (track.y..track.bottom()).step_by(e as usize) {
+            for x in (track.x..track.right()).step_by(e as usize) {
+                if ((x - track.x) / e + (y - track.y) / e) % 2 == 0 {
+                    fill_rect_clipped(buf, w, h, x, y, e, e, theme::STRIPE_LIGHT, &track);
+                }
+            }
+        }
+        stroke_rect(buf, w, h, track.x, track.y, track.w, track.h, e, theme::BEVEL_DARK);
+        let button = |buf: &mut [u32], r: Rect| {
+            if r.w <= 0 || r.h <= 0 { return; }
+            fill_rect(buf, w, h, r.x, r.y, r.w, r.h, theme::BOX_FILL);
+            stroke_rect(buf, w, h, r.x, r.y, r.w, r.h, e, theme::BOX_BORDER);
+            fill_rect(buf, w, h, r.x + e, r.y + e, r.w - 2 * e, e, theme::BEVEL_LIGHT);
+            fill_rect(buf, w, h, r.x + e, r.y + e, e, r.h - 2 * e, theme::BEVEL_LIGHT);
+            fill_rect(buf, w, h, r.x + e, r.bottom() - 2 * e, r.w - 2 * e, e, theme::BEVEL_DARK);
+            fill_rect(buf, w, h, r.right() - 2 * e, r.y + e, e, r.h - 2 * e, theme::BEVEL_DARK);
+        };
+        button(buf, bar.up);
+        button(buf, bar.down);
+        let color = if bar.history_size > 0 { theme::BOX_BORDER } else { theme::BEVEL_DARK };
+        for (r, up) in [(bar.up, true), (bar.down, false)] {
+            let (cx, cy) = r.center();
+            for i in 0..4 {
+                let y = if up { cy - s(2.0) + i * e } else { cy + s(1.0) - i * e };
+                fill_rect_clipped(buf, w, h, cx - i * e, y, (2 * i + 1) * e, e, color, &r);
+            }
+        }
+        if bar.history_size > 0 {
+            button(buf, bar.thumb);
+            let (cx, cy) = bar.thumb.center();
+            for i in -1..=1 {
+                fill_rect_clipped(buf, w, h, cx - s(4.0), cy + i * s(3.0), s(8.0), e, theme::BEVEL_DARK, &bar.thumb);
+                fill_rect_clipped(buf, w, h, cx - s(4.0), cy + i * s(3.0) + e, s(8.0), e, theme::BEVEL_LIGHT, &bar.thumb);
+            }
+        }
+    }
+
+    /// ベルの鳴ったペインだけを短時間反転する。終了時は通常の再描画で戻す。
+    pub fn draw_visual_bell(&self, buf: &mut [u32], width: u32, height: u32, rect: Rect) {
+        let x0 = rect.x.clamp(0, width as i32);
+        let x1 = rect.right().clamp(0, width as i32);
+        let y0 = rect.y.clamp(0, height as i32);
+        let y1 = rect.bottom().clamp(0, height as i32);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                buf[(y as u32 * width + x as u32) as usize] ^= 0x00FF_FFFF;
+            }
+        }
+    }
+
+    /// 未確定文字を PTY の内容に重ね、選択中の文節とキャレットを示す。
+    /// 戻り値はネイティブ IME 候補ウィンドウを置く範囲 (物理 px)。
+    pub fn draw_preedit(
+        &mut self,
+        buf: &mut [u32],
+        width: u32,
+        height: u32,
+        pane: Rect,
+        term: &Term<EventProxy>,
+        preedit: &Preedit,
+        scheme: &Scheme,
+    ) -> Option<Rect> {
+        if preedit.text.is_empty() { return None; }
+        let grid = self.grid_rect(pane);
+        let (cw, ch) = (self.cell_w as i32, self.cell_h as i32);
+        let columns = (grid.w / cw) as usize;
+        let rows = (grid.h / ch) as usize;
+        if columns == 0 || rows == 0 { return None; }
+        let content = term.renderable_content();
+        let cursor = term::point_to_viewport(content.display_offset, content.cursor.point)?;
+        if cursor.line >= rows { return None; }
+        let composition = preedit.layout(columns, cursor.column.0.min(columns - 1));
+        let (w, h) = (width as i32, height as i32);
+        let y = grid.y + cursor.line as i32 * ch;
+        let x = grid.x + composition.start_column as i32 * cw;
+        let width = composition.width as i32 * cw;
+        let edge = (self.scale.round() as i32).max(1);
+        fill_rect_clipped(buf, w, h, x, y, width, ch, scheme.bg, &grid);
+        fill_rect_clipped(buf, w, h, x, y + ch - edge, width, edge, scheme.fg, &grid);
+        if let Some((start, end)) = composition.selection {
+            let x = grid.x + start as i32 * cw;
+            let width = (end - start) as i32 * cw;
+            fill_rect_clipped(buf, w, h, x, y, width, ch, scheme.fg, &grid);
+            fill_rect_clipped(buf, w, h, x, y + ch - edge, width, edge, scheme.bg, &grid);
+        }
+        for glyph in &composition.glyphs {
+            let selected = composition.selection.is_some_and(|(start, end)| glyph.column >= start && glyph.column < end);
+            let color = if selected { scheme.bg } else { scheme.fg };
+            self.draw_cell_glyph(buf, w, h, glyph.character, grid.x + glyph.column as i32 * cw, y, color, &grid);
+        }
+        if let Some(column) = composition.cursor_column {
+            let selected = composition.selection.is_some_and(|(start, end)| column >= start && column < end);
+            let color = if selected { scheme.bg } else { scheme.cursor };
+            fill_rect_clipped(buf, w, h, grid.x + column as i32 * cw, y, edge, ch, color, &grid);
+        }
+        Some(Rect { x: grid.x + composition.candidate_column as i32 * cw, y, w: composition.candidate_width as i32 * cw, h: ch })
     }
 
     /// ペイン間のスプリッターバー。タイトルバーと同じリブ (縞) の意匠。
@@ -503,6 +695,22 @@ impl Renderer {
 
             hits.push(row);
         }
+        let row = Rect {
+            x: c.x, y: c.y + s(32.0) + theme::SCHEMES.len() as i32 * row_h,
+            w: c.w, h: row_h,
+        };
+        let cy = row.y + row.h / 2;
+        let checkbox = Rect { x: row.x + s(2.0), y: cy - s(6.0), w: s(12.0), h: s(12.0) };
+        fill_rect(buf, w, h, checkbox.x, checkbox.y, checkbox.w, checkbox.h, theme::BEVEL_LIGHT);
+        stroke_rect(buf, w, h, checkbox.x, checkbox.y, checkbox.w, checkbox.h, s(1.0), theme::BOX_BORDER);
+        if self.bitmap_text {
+            // ピクセルで描くチェックマーク。
+            for (dx, dy) in [(2.0, 5.0), (3.0, 6.0), (4.0, 7.0), (5.0, 6.0), (6.0, 5.0), (7.0, 4.0), (8.0, 3.0)] {
+                fill_rect(buf, w, h, checkbox.x + s(dx), checkbox.y + s(dy), s(1.0), s(2.0), theme::BOX_BORDER);
+            }
+        }
+        self.draw_title_text(buf, w, h, "ビットマップ風の文字", row.x + s(22.0), cy + ascent / 2 - s(1.0), theme::TITLE_TEXT, clip);
+        hits.push(row);
         hits
     }
 
@@ -632,7 +840,7 @@ impl Renderer {
         let (metrics, bitmap) = self.glyphs.entry(c).or_insert_with(|| font.rasterize(c, px));
         let gx = cell_x + metrics.xmin;
         let gy = cell_y + self.ascent - metrics.ymin - metrics.height as i32;
-        blend_glyph(buf, w, h, gx, gy, metrics, bitmap, color, clip);
+        blend_glyph(buf, w, h, gx, gy, metrics, bitmap, color, clip, self.bitmap_text);
     }
 
     fn measure_title(&mut self, text: &str) -> i32 {
@@ -673,7 +881,7 @@ impl Renderer {
                 self.title_glyphs.entry(c).or_insert_with(|| font.rasterize(c, px));
             let gx = pen.round() as i32 + metrics.xmin;
             let gy = baseline - metrics.ymin - metrics.height as i32;
-            blend_glyph(buf, w, h, gx, gy, metrics, bitmap, color, &clip);
+            blend_glyph(buf, w, h, gx, gy, metrics, bitmap, color, &clip, self.bitmap_text);
             pen += metrics.advance_width;
         }
     }
@@ -740,10 +948,11 @@ fn dim(color: u32) -> u32 {
 // ─── 低レベル描画 ───
 
 fn fill_rect(buf: &mut [u32], bw: i32, bh: i32, x: i32, y: i32, w: i32, h: i32, color: u32) {
-    let x0 = x.max(0);
-    let y0 = y.max(0);
-    let x1 = (x + w).min(bw);
-    let y1 = (y + h).min(bh);
+    let x0 = x.clamp(0, bw);
+    let y0 = y.clamp(0, bh);
+    let x1 = (x + w).clamp(0, bw);
+    let y1 = (y + h).clamp(0, bh);
+    if x1 <= x0 || y1 <= y0 { return; }
     for row in y0..y1 {
         let start = (row * bw + x0) as usize;
         let end = (row * bw + x1) as usize;
@@ -802,6 +1011,7 @@ fn blend_glyph(
     bitmap: &[u8],
     color: u32,
     clip: &Rect,
+    bitmap_text: bool,
 ) {
     let (fr, fg_, fb) = ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
     for row in 0..metrics.height as i32 {
@@ -814,7 +1024,8 @@ fn blend_glyph(
             if px < clip.x || px >= clip.right() || px < 0 || px >= bw {
                 continue;
             }
-            let a = bitmap[(row * metrics.width as i32 + col) as usize] as u32;
+            let coverage = bitmap[(row * metrics.width as i32 + col) as usize] as u32;
+            let a = if bitmap_text { if coverage >= 128 { 255 } else { 0 } } else { coverage };
             if a == 0 {
                 continue;
             }
@@ -830,5 +1041,77 @@ fn blend_glyph(
             let b = (fb * a + db * (255 - a)) / 255;
             buf[idx] = (r << 16) | (g << 8) | b;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane() -> Rect {
+        Rect { x: 10, y: 20, w: 640, h: 480 }
+    }
+
+    #[test]
+    fn thumb_tracks_scrollback_with_live_output_at_the_bottom() {
+        let oldest = ScrollbarLayout::compute(pane(), 1.0, 976, 24, 976);
+        let live = ScrollbarLayout::compute(pane(), 1.0, 976, 24, 0);
+        let middle = ScrollbarLayout::compute(pane(), 1.0, 976, 24, 488);
+        assert_eq!(oldest.thumb.y, oldest.track.y);
+        assert_eq!(live.thumb.bottom(), live.track.bottom());
+        assert_eq!(middle.thumb.y - middle.track.y, (middle.track.h - middle.thumb.h) / 2);
+        assert_eq!(live.offset_for_thumb_top(oldest.thumb.y as f64), 976);
+        assert_eq!(oldest.offset_for_thumb_top(live.thumb.y as f64), 0);
+        assert_eq!(middle.offset_for_thumb_top(middle.thumb.y as f64), 488);
+        assert_eq!(middle.offset_for_thumb_top(-1000.0), 976);
+        assert_eq!(middle.offset_for_thumb_top(10000.0), 0);
+    }
+
+    #[test]
+    fn thumb_size_is_proportional_and_empty_history_is_inert() {
+        let half = ScrollbarLayout::compute(pane(), 2.0, 100, 100, 0);
+        assert!((half.thumb.h * 2 - half.track.h).abs() <= 1);
+        let empty = ScrollbarLayout::compute(pane(), 2.0, 0, 100, 0);
+        assert_eq!(empty.thumb.h, empty.track.h);
+        assert_eq!(empty.offset_for_thumb_top(-1000.0), 0);
+        assert_eq!(empty.offset_for_thumb_top(10000.0), 0);
+    }
+
+    #[test]
+    fn hit_testing_uses_the_same_arrow_thumb_and_page_geometry() {
+        let bar = ScrollbarLayout::compute(pane(), 1.0, 500, 24, 250);
+        let x = bar.bounds.center().0 as f64;
+        assert_eq!(bar.hit_test(x, bar.up.center().1 as f64), Some(ScrollbarPart::Up));
+        assert_eq!(bar.hit_test(x, bar.down.center().1 as f64), Some(ScrollbarPart::Down));
+        assert_eq!(bar.hit_test(x, bar.thumb.center().1 as f64), Some(ScrollbarPart::Thumb));
+        assert_eq!(bar.hit_test(x, bar.thumb.y as f64 - 1.0), Some(ScrollbarPart::PageUp));
+        assert_eq!(bar.hit_test(x, bar.thumb.bottom() as f64), Some(ScrollbarPart::PageDown));
+        assert_eq!(bar.hit_test(bar.bounds.x as f64 - 1.0, bar.thumb.y as f64), None);
+    }
+
+    #[test]
+    fn tiny_panes_never_create_negative_track_or_thumb_sizes() {
+        for width in 0..40 {
+            for height in 0..40 {
+                let bar = ScrollbarLayout::compute(Rect { w: width, h: height, ..pane() }, 2.0, 100, 24, 10);
+                assert!(bar.bounds.w >= 0 && bar.bounds.h >= 0);
+                assert!(bar.track.h >= 0 && bar.thumb.h >= 0);
+                assert!(bar.thumb.y >= bar.track.y && bar.thumb.bottom() <= bar.track.bottom());
+            }
+        }
+    }
+
+    #[test]
+    fn bitmap_text_uses_only_foreground_and_background_pixels() {
+        let mut crisp = [0x0000FF; 3];
+        let mut smooth = crisp;
+        let metrics = Metrics { width: 3, height: 1, ..Metrics::default() };
+        let clip = Rect { x: 0, y: 0, w: 3, h: 1 };
+        blend_glyph(&mut crisp, 3, 1, 0, 0, &metrics, &[127, 128, 255], 0x00FF00, &clip, true);
+        blend_glyph(&mut smooth, 3, 1, 0, 0, &metrics, &[127, 128, 255], 0x00FF00, &clip, false);
+        assert_eq!(crisp, [0x0000FF, 0x00FF00, 0x00FF00]);
+        assert_ne!(smooth[0], crisp[0]);
+        assert_ne!(smooth[1], crisp[1]);
+        assert_eq!(smooth[2], crisp[2]);
     }
 }

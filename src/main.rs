@@ -3,10 +3,12 @@
 
 mod clipboard;
 mod config;
+mod ime;
 mod renderer;
 mod tabs;
 mod term;
 mod theme;
+mod window_shade;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -18,13 +20,13 @@ use alacritty_terminal::event::{Event as TermEvent, WindowSize};
 use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::term::TermMode;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{ResizeDirection, Window, WindowId};
 
-use renderer::{tab_layout, Layout, Rect, Renderer};
+use renderer::{tab_layout, Layout, Rect, Renderer, ScrollbarLayout, ScrollbarPart};
 use tabs::{Pane, SplitDir, SplitterHit, Tab};
 use term::{PaneId, Terminal, UserEvent};
 
@@ -77,6 +79,14 @@ struct TabDrag {
     target: Option<DropTarget>,
 }
 
+/// Cmd+ドラッグで移動するペイン。PTY を保持したまま木を組み替える。
+struct PaneDrag {
+    pane: PaneId,
+    press_pos: (f64, f64),
+    started: bool,
+    target: Option<DropTarget>,
+}
+
 /// タブのドロップ先。
 #[derive(Copy, Clone, PartialEq)]
 enum DropTarget {
@@ -120,7 +130,16 @@ impl Side {
 enum MouseDrag {
     Splitter(SplitterDrag),
     Tab(TabDrag),
+    Pane(PaneDrag),
     Selection(PaneId),
+}
+
+#[derive(Clone, Copy)]
+struct ScrollRepeat {
+    pane: PaneId,
+    part: ScrollbarPart,
+    amount: i32,
+    next: Instant,
 }
 
 /// 設定ウィンドウ (カラースキーマ選択) の状態。
@@ -132,6 +151,7 @@ struct SettingsState {
     row_hits: Vec<Rect>,
     cursor: (f64, f64),
     focused: bool,
+    shade: window_shade::WindowShade,
 }
 
 struct App {
@@ -156,6 +176,11 @@ struct App {
     scheme_index: usize,
     settings: Option<SettingsState>,
     last_click: Option<(PaneId, Point, Instant, u8)>,
+    ime: ime::ImeState,
+    shade: window_shade::WindowShade,
+    bells: Vec<(PaneId, Instant)>,
+    scrollbar_drag: Option<(PaneId, f64)>,
+    scroll_repeat: Option<ScrollRepeat>,
 }
 
 impl App {
@@ -181,6 +206,11 @@ impl App {
             scheme_index: theme::scheme_index(&config::load_scheme().unwrap_or_default()),
             settings: None,
             last_click: None,
+            ime: ime::ImeState::default(),
+            shade: window_shade::WindowShade::default(),
+            bells: Vec::new(),
+            scrollbar_drag: None,
+            scroll_repeat: None,
         }
     }
 
@@ -216,7 +246,9 @@ impl App {
             return;
         };
         let size = window.inner_size();
-        self.layout = Layout::compute(size.width, size.height, renderer.scale, self.tabs.len() > 1);
+        let show_tabs = self.tabs.len() > 1
+            || self.tabs.get(self.active_tab).is_some_and(|tab| tab.root.pane_count() > 1);
+        self.layout = Layout::compute(size.width, size.height, renderer.scale, show_tabs && !self.shade.is_shaded());
 
         self.pane_hits.clear();
         self.splitter_hits.clear();
@@ -233,6 +265,11 @@ impl App {
             self.tab_hits.clear();
             self.plus_hit = None;
         }
+        if self.shade.is_shaded() {
+            self.pane_hits.clear();
+            self.splitter_hits.clear();
+            self.layout.grow_box = Rect::default();
+        }
     }
 
     fn ws_for_rect(&self, rect: Rect) -> Option<WindowSize> {
@@ -248,6 +285,7 @@ impl App {
 
     /// アクティブタブの各ペインの PTY サイズを現在のレイアウトに合わせる。
     fn sync_pane_sizes(&self) {
+        if self.shade.is_shaded() { return; }
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
         for (id, rect) in &self.pane_hits {
             if let (Some(pane), Some(ws)) = (tab.root.find_pane(*id), self.ws_for_rect(*rect)) {
@@ -260,6 +298,7 @@ impl App {
     fn refresh(&mut self) {
         self.update_layout();
         self.sync_pane_sizes();
+        self.sync_ime_target();
         self.redraw();
     }
 
@@ -272,6 +311,54 @@ impl App {
     fn focused_terminal(&self) -> Option<&Terminal> {
         let tab = self.tabs.get(self.active_tab)?;
         tab.root.find_pane(tab.focused).map(|p| &p.terminal)
+    }
+
+    /// IME の入力先をペインに結び付け、フォーカス移動時に未確定入力を破棄する。
+    fn sync_ime_target(&mut self) {
+        let target = if self.focused && !self.shade.is_shaded() {
+            self.tabs.get(self.active_tab).map(|tab| tab.focused)
+        } else { None };
+        if self.ime.set_target(target) {
+            if let Some(window) = &self.window {
+                window.set_ime_allowed(false);
+                window.set_ime_allowed(target.is_some());
+            }
+        }
+    }
+
+    fn cancel_ime(&mut self) {
+        self.ime.reset();
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(false);
+            window.set_ime_allowed(self.focused && !self.shade.is_shaded());
+        }
+        self.redraw();
+    }
+
+    fn handle_ime(&mut self, event: Ime) {
+        self.sync_ime_target();
+        if let Some(text) = self.ime.update(event) {
+            self.write_input(text.into_bytes());
+        } else if self.ime.preedit().is_some() {
+            if let Some(terminal) = self.focused_terminal() {
+                let mut term = terminal.term.lock();
+                term.selection = None;
+                term.scroll_display(Scroll::Bottom);
+            }
+        }
+        self.redraw();
+    }
+
+    fn write_input(&self, bytes: Vec<u8>) {
+        if let Some(terminal) = self.focused_terminal() {
+            {
+                let mut term = terminal.term.lock();
+                term.selection = None;
+                term.scroll_display(Scroll::Bottom);
+            }
+            terminal.write(bytes);
+            self.redraw();
+        }
     }
 
     /// 各ペインのタイトルをシェルの cwd (ホームは ~ に短縮) で更新する。
@@ -297,6 +384,7 @@ impl App {
     fn render(&mut self) {
         self.update_titles();
         self.update_layout();
+        self.sync_ime_target();
         let (Some(window), Some(surface), Some(renderer)) =
             (self.window.as_ref(), self.surface.as_mut(), self.renderer.as_mut())
         else {
@@ -332,6 +420,11 @@ impl App {
             self.focused,
         );
 
+        if self.shade.is_shaded() {
+            let _ = buffer.present();
+            return;
+        }
+
         let scheme = &theme::SCHEMES[self.scheme_index];
         for (id, rect) in &self.pane_hits {
             if let Some(pane) = tab.root.find_pane(*id) {
@@ -346,6 +439,33 @@ impl App {
                     active,
                     scheme,
                 );
+                if active {
+                    let grid = renderer.grid_rect(*rect);
+                    let point = term.grid().cursor.point;
+                    let viewport = alacritty_terminal::term::point_to_viewport(
+                        term.grid().display_offset(), point);
+                    let cw = renderer.cell_w as i32;
+                    let ch = renderer.cell_h as i32;
+                    let col = viewport.map_or(0, |p| p.column.0 as i32)
+                        .clamp(0, (grid.w / cw - 1).max(0));
+                    let row = viewport.map_or(0, |p| p.line as i32)
+                        .clamp(0, (grid.h / ch - 1).max(0));
+                    let mut anchor = Rect {
+                        x: grid.x + col * cw, y: grid.y + row * ch, w: cw, h: ch,
+                    };
+                    if let Some(preedit) = self.ime.preedit() {
+                        if let Some(area) = renderer.draw_preedit(
+                            &mut buffer, size.width, size.height, *rect, &term, preedit, scheme,
+                        ) { anchor = area; }
+                    }
+                    window.set_ime_cursor_area(
+                        PhysicalPosition::new(anchor.x, anchor.y),
+                        PhysicalSize::new(anchor.w.max(1) as u32, anchor.h.max(1) as u32),
+                    );
+                }
+                if self.bells.iter().any(|(pane_id, until)| *pane_id == *id && *until > Instant::now()) {
+                    renderer.draw_visual_bell(&mut buffer, size.width, size.height, *rect);
+                }
             }
         }
         for sh in &self.splitter_hits {
@@ -353,46 +473,54 @@ impl App {
         }
         renderer.draw_grow_box(&mut buffer, size.width, size.height, self.layout.grow_box);
 
-        // タブドラッグ中の視覚フィードバック (最前面)
-        if let Some(MouseDrag::Tab(td)) = &self.drag {
-            if td.started {
-                match td.target {
-                    Some(DropTarget::Dock { pane, side }) => {
-                        if let Some((_, r)) = self.pane_hits.iter().find(|(id, _)| *id == pane) {
-                            renderer.draw_drop_outline(
-                                &mut buffer,
-                                size.width,
-                                size.height,
-                                side.preview(*r),
-                            );
-                        }
+        // タブ・ペインドラッグ中の視覚フィードバック (最前面)
+        let drop_preview = match &self.drag {
+            Some(MouseDrag::Tab(td)) if td.started => Some(td.target),
+            Some(MouseDrag::Pane(pd)) if pd.started => Some(pd.target),
+            _ => None,
+        };
+        if let Some(target) = drop_preview {
+            match target {
+                Some(DropTarget::Dock { pane, side }) => {
+                    if let Some((_, r)) = self.pane_hits.iter().find(|(id, _)| *id == pane) {
+                        renderer.draw_drop_outline(
+                            &mut buffer,
+                            size.width,
+                            size.height,
+                            side.preview(*r),
+                        );
                     }
-                    Some(DropTarget::TabBar(pos)) => {
-                        if let Some(bar) = self.layout.tab_bar {
-                            let s = |v: f64| ((v * renderer.scale).round() as i32).max(1);
-                            let x = match self.tab_hits.get(pos) {
-                                Some(r) => r.x - s(2.0),
-                                None => {
-                                    self.tab_hits.last().map(|r| r.right() + s(1.0)).unwrap_or(bar.x)
-                                }
-                            };
-                            let bar_rect = Rect {
-                                x,
-                                y: bar.y + s(2.0),
-                                w: s(2.0),
-                                h: bar.h - s(4.0),
-                            };
-                            renderer.draw_drop_bar(&mut buffer, size.width, size.height, bar_rect);
-                        }
+                }
+                Some(DropTarget::TabBar(pos)) => {
+                    if let Some(bar) = self.layout.tab_bar {
+                        let s = |v: f64| ((v * renderer.scale).round() as i32).max(1);
+                        let x = match self.tab_hits.get(pos) {
+                            Some(r) => r.x - s(2.0),
+                            None => {
+                                self.tab_hits.last().map(|r| r.right() + s(1.0)).unwrap_or(bar.x)
+                            }
+                        };
+                        let bar_rect = Rect {
+                            x,
+                            y: bar.y + s(2.0),
+                            w: s(2.0),
+                            h: bar.h - s(4.0),
+                        };
+                        renderer.draw_drop_bar(&mut buffer, size.width, size.height, bar_rect);
                     }
-                    None => {}
                 }
-                // ドラッグ中のタブのゴースト枠 (カーソル追従)
-                if let Some(r) = self.tab_hits.get(td.tab_index) {
-                    let (cx, cy) = (self.cursor_pos.0 as i32, self.cursor_pos.1 as i32);
-                    let ghost = Rect { x: cx - r.w / 2, y: cy - r.h / 2, w: r.w, h: r.h };
-                    renderer.draw_drop_outline(&mut buffer, size.width, size.height, ghost);
-                }
+                None => {}
+            }
+            // 移動中のゴースト枠 (カーソル追従)
+            let ghost_size = match &self.drag {
+                Some(MouseDrag::Tab(td)) => self.tab_hits.get(td.tab_index).map(|r| (r.w, r.h)),
+                Some(MouseDrag::Pane(_)) => Some(((120.0 * renderer.scale) as i32, (36.0 * renderer.scale) as i32)),
+                _ => None,
+            };
+            if let Some((w, h)) = ghost_size {
+                let (cx, cy) = (self.cursor_pos.0 as i32, self.cursor_pos.1 as i32);
+                let ghost = Rect { x: cx - w / 2, y: cy - h / 2, w, h };
+                renderer.draw_drop_outline(&mut buffer, size.width, size.height, ghost);
             }
         }
 
@@ -401,8 +529,15 @@ impl App {
 
     // ─── タブ・ペイン操作 ───
 
+    fn cancel_pointer_gestures(&mut self) {
+        self.drag = None;
+        self.scrollbar_drag = None;
+        self.scroll_repeat = None;
+    }
+
     fn new_tab(&mut self) {
         if let Some(pane) = self.new_pane() {
+            self.cancel_pointer_gestures();
             self.tabs.push(Tab::new(pane));
             self.active_tab = self.tabs.len() - 1;
             self.refresh();
@@ -411,6 +546,11 @@ impl App {
 
     fn select_tab(&mut self, index: usize) {
         if index < self.tabs.len() && index != self.active_tab {
+            if !matches!(self.drag, Some(MouseDrag::Pane(_) | MouseDrag::Tab(_))) {
+                self.drag = None;
+            }
+            self.scrollbar_drag = None;
+            self.scroll_repeat = None;
             self.active_tab = index;
             self.refresh();
         }
@@ -429,6 +569,7 @@ impl App {
         if self.tabs.is_empty() {
             return;
         }
+        self.cancel_pointer_gestures();
         // Tab の drop で全ペインの PTY が停止する
         self.tabs.remove(self.active_tab);
         if self.tabs.is_empty() {
@@ -443,6 +584,7 @@ impl App {
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
         let target = tab.focused;
         let Some(pane) = self.new_pane() else { return };
+        self.cancel_pointer_gestures();
         let new_id = pane.id;
         let mut carrier = Some(pane);
         let tab = &mut self.tabs[self.active_tab];
@@ -455,6 +597,8 @@ impl App {
     /// ペインを1つ閉じる。タブ最後のペインならタブごと閉じる。
     fn close_pane(&mut self, id: PaneId, event_loop: &ActiveEventLoop) {
         let Some(tab_idx) = self.tabs.iter().position(|t| t.root.contains(id)) else { return };
+        // シェルがドラッグ中に終了しても、古いタブ番号や分割番号を使わない。
+        self.cancel_pointer_gestures();
 
         if self.tabs[tab_idx].root.is_leaf_of(id) {
             self.tabs.remove(tab_idx);
@@ -517,11 +661,12 @@ impl App {
             self.settings = None;
             return;
         }
+        self.cancel_ime();
         let attrs = Window::default_attributes()
             .with_title("設定")
             .with_decorations(false)
             .with_resizable(false)
-            .with_inner_size(LogicalSize::new(300.0, 200.0));
+            .with_inner_size(LogicalSize::new(300.0, 236.0));
         let Ok(window) = event_loop.create_window(attrs) else { return };
         let window = Rc::new(window);
         let Ok(context) = softbuffer::Context::new(window.clone()) else { return };
@@ -535,6 +680,7 @@ impl App {
             row_hits: Vec::new(),
             cursor: (0.0, 0.0),
             focused: true,
+            shade: window_shade::WindowShade::default(),
         });
     }
 
@@ -562,6 +708,12 @@ impl App {
             &[],
             st.focused,
         );
+        st.layout = layout;
+        if st.shade.is_shaded() {
+            st.row_hits.clear();
+            let _ = buffer.present();
+            return;
+        }
         let hits =
             renderer.draw_settings(&mut buffer, size.width, size.height, &layout, self.scheme_index);
         st.layout = layout;
@@ -580,6 +732,15 @@ impl App {
         if let Some(st) = &self.settings {
             st.window.request_redraw();
         }
+    }
+
+    fn toggle_bitmap_text(&mut self) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.bitmap_text = !renderer.bitmap_text;
+            config::save_bitmap_text(renderer.bitmap_text);
+        }
+        self.redraw();
+        if let Some(st) = &self.settings { st.window.request_redraw(); }
     }
 
     fn handle_settings_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
@@ -601,14 +762,19 @@ impl App {
             WindowEvent::MouseInput {
                 state: ElementState::Pressed, button: MouseButton::Left, ..
             } => {
-                let Some(st) = &self.settings else { return };
+                let Some(st) = &mut self.settings else { return };
                 let (x, y) = st.cursor;
                 if st.layout.close_box.contains(x, y) {
                     self.settings = None;
                 } else if st.layout.collapse_box.contains(x, y) {
-                    st.window.set_minimized(true);
+                    st.shade.toggle(&st.window, st.window.scale_factor(), None);
+                    st.window.request_redraw();
                 } else if let Some(i) = st.row_hits.iter().position(|r| r.contains(x, y)) {
-                    self.apply_scheme(i);
+                    if i == theme::SCHEMES.len() {
+                        self.toggle_bitmap_text();
+                    } else {
+                        self.apply_scheme(i);
+                    }
                 } else if st.layout.titlebar.contains(x, y) {
                     let _ = st.window.drag_window();
                 }
@@ -643,10 +809,19 @@ impl App {
         }
         let mods = self.modifiers;
 
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && (self.drag.is_some() || self.scrollbar_drag.is_some() || self.scroll_repeat.is_some()) {
+            self.cancel_pointer_gestures();
+            self.redraw();
+            return;
+        }
+
         if mods.super_key() {
             self.handle_command_key(&event, event_loop);
             return;
         }
+
+        if !self.focused || self.shade.is_shaded() { return; }
 
         let Some(terminal) = self.focused_terminal() else { return };
         let app_cursor = terminal.term.lock().mode().contains(TermMode::APP_CURSOR);
@@ -688,13 +863,10 @@ impl App {
         });
 
         if let Some(bytes) = bytes {
-            // 入力時はスクロールを最下部へ戻す
-            {
-                let mut term = terminal.term.lock();
-                term.selection = None;
-                term.scroll_display(Scroll::Bottom);
-            }
-            terminal.write(bytes);
+            // macOS が IME で消費したキーは winit が抑制する。
+            // ここに届く Ctrl+C 等は変換を中止して通常どおり端末へ送る。
+            if self.ime.preedit().is_some() { self.cancel_ime(); }
+            self.write_input(bytes);
         }
     }
 
@@ -721,6 +893,7 @@ impl App {
             }
             "c" => self.copy_selection(),
             "v" => self.paste_clipboard(),
+            "t" if shift => self.detach_focused_pane(),
             "t" => self.new_tab(),
             "w" if shift => self.close_focused_pane(event_loop),
             "w" => self.close_active_tab(event_loop),
@@ -747,12 +920,12 @@ impl App {
             return;
         }
         if self.layout.zoom_box.contains(x, y) {
+            if self.shade.is_shaded() { self.toggle_shade(); }
             window.set_maximized(!window.is_maximized());
             return;
         }
         if self.layout.collapse_box.contains(x, y) {
-            // OS9のウィンドウシェードの代わりに最小化
-            window.set_minimized(true);
+            self.toggle_shade();
             return;
         }
         if let Some(i) = self.tab_hits.iter().position(|r| r.contains(x, y)) {
@@ -789,6 +962,17 @@ impl App {
         if let Some((id, _)) = self.pane_hits.iter().find(|(_, r)| r.contains(x, y)) {
             let id = *id;
             self.tabs[self.active_tab].focused = id;
+            if self.modifiers.super_key() {
+                self.last_click = None;
+                self.drag = Some(MouseDrag::Pane(PaneDrag {
+                    pane: id,
+                    press_pos: (x, y),
+                    started: false,
+                    target: None,
+                }));
+                self.redraw();
+                return;
+            }
             if let Some((point, side)) = self.selection_point(id) {
                 let now = Instant::now();
                 let count = self.last_click.filter(|(pid, p, t, _)|
@@ -829,6 +1013,69 @@ impl App {
         Some((point, side))
     }
 
+    fn toggle_shade(&mut self) {
+        if let Some(window) = &self.window {
+            self.shade.toggle(window, window.scale_factor(), Some(LogicalSize::new(320.0, 200.0)));
+        }
+        self.drag = None;
+        self.scrollbar_drag = None;
+        self.scroll_repeat = None;
+        self.refresh();
+    }
+
+    fn scrollbar_for(&self, id: PaneId) -> Option<ScrollbarLayout> {
+        let renderer = self.renderer.as_ref()?;
+        let (_, rect) = self.pane_hits.iter().find(|(pane, _)| *pane == id)?;
+        let pane = self.tabs.get(self.active_tab)?.root.find_pane(id)?;
+        Some(renderer.scrollbar_layout(*rect, &pane.terminal.term.lock()))
+    }
+
+    fn scroll_pane(&self, id: PaneId, delta: i32) {
+        if let Some(pane) = self.tabs.get(self.active_tab).and_then(|tab| tab.root.find_pane(id)) {
+            pane.terminal.term.lock().scroll_display(Scroll::Delta(delta));
+            self.redraw();
+        }
+    }
+
+    fn handle_scrollbar_press(&mut self) -> bool {
+        let (x, y) = self.cursor_pos;
+        let Some(id) = self.pane_hits.iter().find(|(_, rect)| rect.contains(x, y)).map(|(id, _)| *id)
+        else { return false };
+        let Some(bar) = self.scrollbar_for(id) else { return false };
+        if !bar.bounds.contains(x, y) { return false; }
+        // A disabled scrollbar still consumes clicks; it must not select terminal text.
+        let Some(part) = bar.hit_test(x, y) else { return true };
+        let lines = self.ws_for_rect(self.pane_hits.iter().find(|(pane, _)| *pane == id).unwrap().1)
+            .map_or(1, |ws| ws.num_lines.saturating_sub(1).max(1) as i32);
+        let amount = match part {
+            ScrollbarPart::Up => 1,
+            ScrollbarPart::Down => -1,
+            ScrollbarPart::PageUp => lines,
+            ScrollbarPart::PageDown => -lines,
+            ScrollbarPart::Thumb => {
+                self.scrollbar_drag = Some((id, y - bar.thumb.y as f64));
+                return true;
+            }
+        };
+        self.scroll_pane(id, amount);
+        self.scroll_repeat = Some(ScrollRepeat {
+            pane: id, part, amount, next: Instant::now() + Duration::from_millis(350),
+        });
+        true
+    }
+
+    fn handle_scrollbar_drag(&mut self) {
+        let Some((id, grab_y)) = self.scrollbar_drag else { return };
+        let Some(bar) = self.scrollbar_for(id) else { self.scrollbar_drag = None; return };
+        let target = bar.offset_for_thumb_top(self.cursor_pos.1 - grab_y);
+        if let Some(pane) = self.tabs.get(self.active_tab).and_then(|tab| tab.root.find_pane(id)) {
+            let mut term = pane.terminal.term.lock();
+            let current = term.grid().display_offset();
+            term.scroll_display(Scroll::Delta((target as i64 - current as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32));
+        }
+        self.redraw();
+    }
+
     fn update_selection(&mut self, id: PaneId) {
         if let Some((point, side)) = self.selection_point(id) {
             if let Some(pane) = self.tabs[self.active_tab].root.find_pane(id) {
@@ -850,7 +1097,8 @@ impl App {
         }
     }
 
-    fn paste_clipboard(&self) {
+    fn paste_clipboard(&mut self) {
+        self.cancel_ime();
         let Some(terminal) = self.focused_terminal() else { return };
         match clipboard::get() {
             Ok(text) => {
@@ -909,39 +1157,93 @@ impl App {
         self.redraw();
     }
 
+    fn handle_pane_drag(&mut self) {
+        let scale = self.renderer.as_ref().map(|r| r.scale).unwrap_or(1.0);
+        let Some(MouseDrag::Pane(pd)) = &self.drag else { return };
+        let (x, y) = self.cursor_pos;
+        let (px, py) = pd.press_pos;
+        if !pd.started && (x - px).abs() <= 4.0 * scale && (y - py).abs() <= 4.0 * scale {
+            return;
+        }
+        let source = pd.pane;
+        // 別タブの上を通ると切り替える。そのまま本文へ降ろしてドックできる。
+        if let Some(index) = self.tab_hits.iter().position(|r| r.contains(x, y)) {
+            self.select_tab(index);
+        }
+        let target = self.tab_drop_position().map(DropTarget::TabBar)
+            .or_else(|| self.pane_drop_target(Some(source)));
+        if let Some(MouseDrag::Pane(pd)) = &mut self.drag {
+            pd.started = true;
+            pd.target = target;
+        }
+        self.redraw();
+    }
+
+    fn finish_pane_drag(&mut self, pd: PaneDrag) {
+        if !pd.started {
+            return;
+        }
+        let destination = match pd.target {
+            Some(DropTarget::TabBar(position)) => tabs::detach_pane(&mut self.tabs, pd.pane, position),
+            Some(DropTarget::Dock { pane, side }) => {
+                let (dir, before) = side.split();
+                tabs::move_pane(&mut self.tabs, pd.pane, pane, dir, before)
+            }
+            None => None,
+        };
+        if let Some(index) = destination {
+            self.active_tab = index;
+            self.refresh();
+        } else {
+            self.redraw();
+        }
+    }
+
+    fn detach_focused_pane(&mut self) {
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let source = tab.focused;
+        if let Some(index) = tabs::detach_pane(&mut self.tabs, source, self.active_tab + 1) {
+            self.cancel_pointer_gestures();
+            self.active_tab = index;
+            self.refresh();
+        }
+    }
+
+    fn tab_drop_position(&self) -> Option<usize> {
+        let (x, y) = self.cursor_pos;
+        if !self.layout.tab_bar.is_some_and(|bar| bar.contains(x, y)) {
+            return None;
+        }
+        Some(self.tab_hits.iter().position(|r| x < (r.x + r.w / 2) as f64)
+            .unwrap_or(self.tab_hits.len()))
+    }
+
+    fn pane_drop_target(&self, exclude: Option<PaneId>) -> Option<DropTarget> {
+        let (x, y) = self.cursor_pos;
+        let (id, rect) = self.pane_hits.iter()
+            .find(|(id, r)| Some(*id) != exclude && r.contains(x, y))?;
+        let nx = (x - rect.x as f64) / rect.w.max(1) as f64;
+        let ny = (y - rect.y as f64) / rect.h.max(1) as f64;
+        let side = [
+            (nx, Side::Left),
+            (1.0 - nx, Side::Right),
+            (ny, Side::Top),
+            (1.0 - ny, Side::Bottom),
+        ].into_iter().min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, side)| side)?;
+        Some(DropTarget::Dock { pane: *id, side })
+    }
+
     /// カーソル位置からタブのドロップ先を決める。
     fn compute_drop_target(&self, dragging: usize) -> Option<DropTarget> {
-        let (x, y) = self.cursor_pos;
-
         // タブバー内: 並べ替え。挿入位置は各タブの中心との比較で決める
-        if self.layout.tab_bar.is_some_and(|bar| bar.contains(x, y)) {
-            let mut pos = self.tab_hits.len();
-            for (i, r) in self.tab_hits.iter().enumerate() {
-                if x < (r.x + r.w / 2) as f64 {
-                    pos = i;
-                    break;
-                }
-            }
+        if let Some(pos) = self.tab_drop_position() {
             return Some(DropTarget::TabBar(pos));
         }
 
         // ペイン上: 上下左右のうち最も近い辺へドッキング。
         // アクティブタブ自身は自分の中にドックできない
         if dragging != self.active_tab {
-            if let Some((id, rect)) = self.pane_hits.iter().find(|(_, r)| r.contains(x, y)) {
-                let nx = (x - rect.x as f64) / rect.w.max(1) as f64;
-                let ny = (y - rect.y as f64) / rect.h.max(1) as f64;
-                let side = [
-                    (nx, Side::Left),
-                    (1.0 - nx, Side::Right),
-                    (ny, Side::Top),
-                    (1.0 - ny, Side::Bottom),
-                ]
-                .into_iter()
-                .min_by(|a, b| a.0.total_cmp(&b.0))
-                .map(|(_, s)| s)?;
-                return Some(DropTarget::Dock { pane: *id, side });
-            }
+            return self.pane_drop_target(None);
         }
         None
     }
@@ -1018,7 +1320,9 @@ impl ApplicationHandler<UserEvent> for App {
             .with_min_inner_size(LogicalSize::new(320.0, 200.0));
         let window = Rc::new(event_loop.create_window(attrs).expect("ウィンドウ作成失敗"));
 
-        self.renderer = Some(Renderer::new(window.scale_factor()));
+        let mut renderer = Renderer::new(window.scale_factor());
+        renderer.bitmap_text = config::load_bitmap_text();
+        self.renderer = Some(renderer);
 
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context作成失敗");
         let surface =
@@ -1036,6 +1340,12 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, ue: UserEvent) {
         let UserEvent { pane, event } = ue;
         match event {
+            TermEvent::Bell => {
+                let until = Instant::now() + Duration::from_millis(140);
+                self.bells.retain(|(id, _)| *id != pane);
+                self.bells.push((pane, until));
+                self.redraw();
+            }
             TermEvent::Wakeup => {
                 if self.tabs.get(self.active_tab).is_some_and(|t| t.root.contains(pane)) {
                     self.redraw();
@@ -1085,6 +1395,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.handle_settings_event(event_loop, event);
             return;
         }
+        if !self.window.as_ref().is_some_and(|window| window.id() == window_id) { return; }
         match event {
             WindowEvent::CloseRequested => {
                 self.tabs.clear();
@@ -1092,20 +1403,30 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(_) => self.refresh(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.renderer = Some(Renderer::new(scale_factor));
+                let mut renderer = Renderer::new(scale_factor);
+                renderer.bitmap_text = config::load_bitmap_text();
+                self.renderer = Some(renderer);
+                if let Some(window) = &self.window { self.shade.update_scale(window, scale_factor); }
                 self.refresh();
             }
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
-                if !focused { self.drag = None; }
+                if !focused {
+                    self.drag = None;
+                    self.scrollbar_drag = None;
+                    self.scroll_repeat = None;
+                    self.modifiers = ModifiersState::default();
+                }
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
+                self.handle_scrollbar_drag();
                 match &self.drag {
                     Some(MouseDrag::Splitter(_)) => self.handle_splitter_drag(),
                     Some(MouseDrag::Tab(_)) => self.handle_tab_drag(),
+                    Some(MouseDrag::Pane(_)) => self.handle_pane_drag(),
                     Some(MouseDrag::Selection(id)) => self.update_selection(*id),
                     None => {}
                 }
@@ -1113,14 +1434,20 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput {
                 state: ElementState::Pressed, button: MouseButton::Left, ..
             } => {
-                self.handle_mouse_press(event_loop);
+                if !self.handle_scrollbar_press() {
+                    self.handle_mouse_press(event_loop);
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Released, button: MouseButton::Left, ..
             } => {
+                self.scrollbar_drag = None;
+                self.scroll_repeat = None;
                 if let Some(drag) = self.drag.take() {
-                    if let MouseDrag::Tab(td) = drag {
-                        self.finish_tab_drag(td);
+                    match drag {
+                        MouseDrag::Tab(td) => self.finish_tab_drag(td),
+                        MouseDrag::Pane(pd) => self.finish_pane_drag(pd),
+                        _ => {},
                     }
                 }
             }
@@ -1150,8 +1477,36 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(event, event_loop),
+            WindowEvent::Ime(event) => self.handle_ime(event),
             WindowEvent::RedrawRequested => self.render(),
             _ => {}
         }
+        self.sync_ime_target();
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let had_bells = self.bells.len();
+        self.bells.retain(|(_, until)| *until > now);
+        if self.bells.len() != had_bells { self.redraw(); }
+        if let Some(mut repeat) = self.scroll_repeat {
+            if now >= repeat.next {
+                if let Some(bar) = self.scrollbar_for(repeat.pane) {
+                    if bar.hit_test(self.cursor_pos.0, self.cursor_pos.1) == Some(repeat.part) {
+                        self.scroll_pane(repeat.pane, repeat.amount);
+                    }
+                    repeat.next = now + Duration::from_millis(65);
+                    self.scroll_repeat = Some(repeat);
+                } else {
+                    self.scroll_repeat = None;
+                }
+            }
+        }
+        let deadline = self.bells.iter().map(|(_, until)| *until)
+            .chain(self.scroll_repeat.map(|repeat| repeat.next)).min();
+        event_loop.set_control_flow(match deadline {
+            Some(until) => ControlFlow::WaitUntil(until),
+            None => ControlFlow::Wait,
+        });
     }
 }

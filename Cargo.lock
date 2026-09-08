@@ -1069,6 +1069,7 @@ dependencies = [
  "alacritty_terminal",
  "fontdue",
  "softbuffer",
+ "unicode-width",
  "winit",
 ]
 
