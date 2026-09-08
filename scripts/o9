@@ -10,4 +10,4 @@ if [ "$#" -gt 1 ]; then
     exit 2
 fi
 directory=$(cd -- "${1:-$PWD}" && pwd -P)
-exec /usr/bin/open -n "$app" --args --working-directory "$directory"
+exec /usr/bin/open -a "$app" "$directory"

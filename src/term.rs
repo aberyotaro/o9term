@@ -1,7 +1,8 @@
 //! PTY とターミナルエミュレーション層 (alacritty_terminal) の起動・接続。
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
@@ -15,11 +16,16 @@ use winit::event_loop::EventLoopProxy;
 /// ペインの識別子。イベントの発生元 PTY を特定するために使う。
 pub type PaneId = u64;
 
-/// winit のイベントループへ流すユーザーイベント。どのペインの端末からの
-/// 通知かを `pane` で判別する。
-pub struct UserEvent {
-    pub pane: PaneId,
-    pub event: Event,
+/// 全ウィンドウで一意な ID。閉じたペインから遅れて届くイベントも区別する。
+pub fn next_pane_id() -> PaneId {
+    static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// winit のイベントループへ流す端末通知と、新規ウィンドウの要求。
+pub enum UserEvent {
+    Terminal { pane: PaneId, event: Event },
+    NewWindow(PathBuf),
 }
 
 /// alacritty_terminal からのイベントを winit のイベントループへ転送する。
@@ -31,7 +37,7 @@ pub struct EventProxy {
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        let _ = self.proxy.send_event(UserEvent { pane: self.pane, event });
+        let _ = self.proxy.send_event(UserEvent::Terminal { pane: self.pane, event });
     }
 }
 
@@ -69,6 +75,7 @@ impl Terminal {
         proxy: EventLoopProxy<UserEvent>,
         pane: PaneId,
         window_size: WindowSize,
+        working_directory: Option<&Path>,
     ) -> std::io::Result<Self> {
         let grid = GridSize {
             columns: window_size.num_cols as usize,
@@ -79,7 +86,11 @@ impl Terminal {
         let term = Term::new(Config::default(), &grid, event_proxy.clone());
         let term = Arc::new(FairMutex::new(term));
 
-        let mut options = tty::Options::default();
+        let mut options = tty::Options {
+            // 子プロセスだけの cwd を指定し、他のウィンドウへ影響させない。
+            working_directory: working_directory.map(Path::to_path_buf),
+            ..tty::Options::default()
+        };
         options.env.insert("TERM_PROGRAM".into(), "os9terminal".into());
         if let Ok(executable) = std::env::current_exe() {
             if let Some(contents) = executable.parent().and_then(|dir| dir.parent()) {
@@ -205,7 +216,18 @@ fn child_pids(ppid: i32) -> Vec<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::proc_cwd;
+    use super::{next_pane_id, proc_cwd};
+
+    #[test]
+    fn pane_ids_are_unique_across_concurrent_allocations() {
+        let workers: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(|| (0..64).map(|_| next_pane_id()).collect::<Vec<_>>()))
+            .collect();
+        let ids: Vec<_> = workers.into_iter().flat_map(|worker| worker.join().unwrap()).collect();
+        let distinct: std::collections::HashSet<_> = ids.iter().copied().collect();
+        assert_eq!(distinct.len(), ids.len());
+        assert!(!distinct.contains(&0));
+    }
 
     #[test]
     fn proc_cwd_returns_own_cwd() {

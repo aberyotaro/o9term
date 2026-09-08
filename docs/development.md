@@ -2,6 +2,17 @@
 
 Develop with `cargo run`; validate with `cargo test`.
 
+## Window lifecycle
+
+`src/main.rs` coordinates independent terminal windows in one event loop and
+routes events by window or globally unique pane ID. `src/terminal_window.rs`
+owns each window's tabs, input, rendering and settings. Cmd+N inherits the
+focused pane's working directory; each PTY receives its own startup directory
+without changing the application process's working directory.
+
+Closing a window, its final tab or its final shell leaves the other windows
+running. Cmd+Q closes the entire app; closing all terminal windows also exits.
+
 ## Build a release package (maintainers only)
 
 Requires macOS, Rust, Python 3.11+, Xcode Command Line Tools and Homebrew.
@@ -22,6 +33,9 @@ No Rust, Python, Homebrew or network access is needed by the installer.
 Open a new terminal afterwards and run `o9`.
 The command opens a new window in the caller's working directory;
 `o9 /path/to/project` can specify a directory.
+The launcher uses `open -a` to send a folder-open event to the existing app.
+`src/instance.rs` bridges native launch and folder-open events into window
+requests, keeping all windows in one application process with one Dock icon.
 
 The installer backs up shell configuration before first modification and keeps
 the previous application as `o9term.app.previous` when updating.

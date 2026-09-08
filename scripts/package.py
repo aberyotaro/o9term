@@ -97,6 +97,12 @@ with (contents / "Info.plist").open("wb") as stream:
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,
+        "CFBundleDocumentTypes": [{
+            "CFBundleTypeName": "Terminal working directory",
+            "CFBundleTypeRole": "Shell",
+            "LSHandlerRank": "Alternate",
+            "LSItemContentTypes": ["public.folder"],
+        }],
         "NSHighResolutionCapable": True,
     }, stream)
 for binary in processed:
