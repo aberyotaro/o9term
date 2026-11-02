@@ -48,6 +48,12 @@ pub struct GridSize {
     pub screen_lines: usize,
 }
 
+impl From<WindowSize> for GridSize {
+    fn from(ws: WindowSize) -> Self {
+        Self { columns: ws.num_cols as usize, screen_lines: ws.num_lines as usize }
+    }
+}
+
 impl Dimensions for GridSize {
     fn total_lines(&self) -> usize {
         self.screen_lines
@@ -60,6 +66,13 @@ impl Dimensions for GridSize {
     fn columns(&self) -> usize {
         self.columns
     }
+}
+
+/// .app バンドルの Resources。シェル統合スクリプトが無ければ None。
+fn resources_dir() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let resources = executable.parent()?.parent()?.join("Resources");
+    resources.join("integration.zsh").is_file().then_some(resources)
 }
 
 /// シェル・PTY・端末状態をまとめたハンドル。
@@ -77,10 +90,7 @@ impl Terminal {
         window_size: WindowSize,
         working_directory: Option<&Path>,
     ) -> std::io::Result<Self> {
-        let grid = GridSize {
-            columns: window_size.num_cols as usize,
-            screen_lines: window_size.num_lines as usize,
-        };
+        let grid = GridSize::from(window_size);
 
         let event_proxy = EventProxy { proxy, pane };
         let term = Term::new(Config::default(), &grid, event_proxy.clone());
@@ -92,12 +102,8 @@ impl Terminal {
             ..tty::Options::default()
         };
         options.env.insert("TERM_PROGRAM".into(), "os9terminal".into());
-        if let Ok(executable) = std::env::current_exe()
-            && let Some(contents) = executable.parent().and_then(|dir| dir.parent()) {
-            let resources = contents.join("Resources");
-            if resources.join("integration.zsh").is_file() {
-                options.env.insert("OS9_RESOURCES".into(), resources.to_string_lossy().into_owned());
-            }
+        if let Some(resources) = resources_dir() {
+            options.env.insert("OS9_RESOURCES".into(), resources.to_string_lossy().into_owned());
         }
         options.env.insert("TERM".into(), "xterm-256color".into());
         options.env.insert("COLORTERM".into(), "truecolor".into());
@@ -134,10 +140,7 @@ impl Terminal {
 
     /// グリッドと PTY の両方をリサイズする。
     pub fn resize(&self, ws: WindowSize) {
-        self.term.lock().resize(GridSize {
-            columns: ws.num_cols as usize,
-            screen_lines: ws.num_lines as usize,
-        });
+        self.term.lock().resize(GridSize::from(ws));
         let _ = self.sender.send(Msg::Resize(ws));
     }
 }
