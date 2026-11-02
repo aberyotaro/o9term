@@ -220,7 +220,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(scale: f64) -> Self {
+    pub fn new(scale: f64, bitmap_text: bool) -> Self {
         let face = Face::new(MONACO, (FONT_PT as f64 * scale) as f32);
         let title_face = Face::new(GENEVA, (TITLE_PT as f64 * scale) as f32);
 
@@ -235,7 +235,7 @@ impl Renderer {
             cell_h,
             ascent,
             scale,
-            bitmap_text: false,
+            bitmap_text,
         }
     }
 

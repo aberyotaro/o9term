@@ -102,7 +102,7 @@ impl App {
             return;
         }
         let position = source.and_then(|index| self.windows.get(index))
-            .and_then(TerminalWindow::primary_window).and_then(|window| {
+            .map(TerminalWindow::primary_window).and_then(|window| {
                 let position = window.outer_position().ok()?;
                 let offset = (24.0 * window.scale_factor()).round() as i32;
                 let mut x = position.x + offset;
@@ -116,10 +116,9 @@ impl App {
                 }
                 Some(PhysicalPosition::new(x, y))
             });
-        let mut window = TerminalWindow::new(self.proxy.clone(), directory);
-        match window.open(event_loop, position) {
-            Ok(()) => {
-                self.active_window = window.primary_window().map(|window| window.id());
+        match TerminalWindow::open(self.proxy.clone(), directory, event_loop, position) {
+            Ok(window) => {
+                self.active_window = Some(window.primary_window().id());
                 self.windows.push(window);
             }
             Err(error) => {
@@ -135,7 +134,7 @@ impl App {
             self.active_window = None;
             event_loop.exit();
         } else if self.active_index().is_none() {
-            self.active_window = self.windows.last().and_then(TerminalWindow::primary_window).map(|window| window.id());
+            self.active_window = self.windows.last().map(|window| window.primary_window().id());
         }
     }
 }
@@ -161,7 +160,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let Some(index) = self.windows.iter().position(|window| window.owns_window(id)) else { return };
         if matches!(event, WindowEvent::Focused(true)) {
-            self.active_window = self.windows[index].primary_window().map(|window| window.id());
+            self.active_window = Some(self.windows[index].primary_window().id());
         }
         match app_command(&event, self.windows[index].modifiers()) {
             Some(AppCommand::NewWindow) => {

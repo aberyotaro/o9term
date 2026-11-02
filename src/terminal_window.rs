@@ -353,10 +353,10 @@ struct SettingsState {
 
 pub struct TerminalWindow {
     proxy: EventLoopProxy<UserEvent>,
-    window: Option<Rc<Window>>,
-    _context: Option<softbuffer::Context<Rc<Window>>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
-    renderer: Option<Renderer>,
+    window: Rc<Window>,
+    _context: softbuffer::Context<Rc<Window>>,
+    surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+    renderer: Renderer,
     panes: Panes,
     initial_directory: PathBuf,
     layout: Layout,
@@ -379,12 +379,12 @@ pub struct TerminalWindow {
 
 impl TerminalWindow {
     pub fn owns_window(&self, id: WindowId) -> bool {
-        self.window.as_ref().is_some_and(|window| window.id() == id)
+        self.window.id() == id
             || self.settings.as_ref().is_some_and(|settings| settings.window.id() == id)
     }
 
-    pub fn primary_window(&self) -> Option<&Window> {
-        self.window.as_deref()
+    pub fn primary_window(&self) -> &Window {
+        &self.window
     }
 
     pub fn contains_pane(&self, pane: PaneId) -> bool {
@@ -402,51 +402,23 @@ impl TerminalWindow {
     }
 
     pub fn preferences(&self) -> (usize, bool) {
-        (self.scheme_index, self.renderer.as_ref().is_some_and(|renderer| renderer.bitmap_text))
+        (self.scheme_index, self.renderer.bitmap_text)
     }
 
     pub fn apply_preferences(&mut self, (scheme, bitmap): (usize, bool)) {
         self.scheme_index = scheme;
-        if let Some(renderer) = &mut self.renderer { renderer.bitmap_text = bitmap; }
+        self.renderer.bitmap_text = bitmap;
         self.redraw();
         if let Some(settings) = &self.settings { settings.window.request_redraw(); }
     }
 
-    pub fn new(proxy: EventLoopProxy<UserEvent>, initial_directory: PathBuf) -> Self {
-        Self {
-            proxy,
-            window: None,
-            _context: None,
-            surface: None,
-            renderer: None,
-            panes: Panes::default(),
-            initial_directory,
-            layout: Layout::default(),
-            pane_hits: Vec::new(),
-            splitter_hits: Vec::new(),
-            drag: None,
-            modifiers: ModifiersState::default(),
-            cursor_pos: (0.0, 0.0),
-            focused: true,
-            scheme_index: theme::scheme_index(&config::load_scheme().unwrap_or_default()),
-            settings: None,
-            last_click: None,
-            ime: ime::ImeState::default(),
-            shade: window_shade::WindowShade::default(),
-            bells: Vec::new(),
-            scrollbar_drag: None,
-            scroll_repeat: None,
-        }
-    }
-
     fn splitter_width(&self) -> i32 {
-        let scale = self.renderer.as_ref().map(|r| r.scale).unwrap_or(1.0);
-        ((8.0 * scale).round() as i32).max(6)
+        ((8.0 * self.renderer.scale).round() as i32).max(6)
     }
 
     /// 新しいペイン (= 新しい PTY) を作る。
     fn new_pane(&mut self) -> Option<Pane> {
-        let renderer = self.renderer.as_ref()?;
+        let renderer = &self.renderer;
         let id = term::next_pane_id();
         let directory = self.working_directory();
         // 実寸は直後の sync_pane_sizes で合わせるため仮サイズで起動する
@@ -467,11 +439,8 @@ impl TerminalWindow {
 
     /// レイアウトとヒットテスト用の矩形キャッシュを再計算する。
     fn update_layout(&mut self) {
-        let (Some(window), Some(renderer)) = (self.window.as_ref(), self.renderer.as_ref()) else {
-            return;
-        };
-        let size = window.inner_size();
-        self.layout = Layout::compute(size.width, size.height, renderer.scale);
+        let size = self.window.inner_size();
+        self.layout = Layout::compute(size.width, size.height, self.renderer.scale);
 
         self.pane_hits.clear();
         self.splitter_hits.clear();
@@ -484,23 +453,23 @@ impl TerminalWindow {
         }
     }
 
-    fn ws_for_rect(&self, rect: Rect) -> Option<WindowSize> {
-        let renderer = self.renderer.as_ref()?;
+    fn ws_for_rect(&self, rect: Rect) -> WindowSize {
+        let renderer = &self.renderer;
         let grid = renderer.grid_rect(rect);
-        Some(WindowSize {
+        WindowSize {
             num_cols: ((grid.w.max(0) as usize) / renderer.cell_w).max(2) as u16,
             num_lines: ((grid.h.max(0) as usize) / renderer.cell_h).max(1) as u16,
             cell_width: renderer.cell_w as u16,
             cell_height: renderer.cell_h as u16,
-        })
+        }
     }
 
     /// 各ペインの PTY サイズを現在のレイアウトに合わせる。
     fn sync_pane_sizes(&self) {
         if self.shade.is_shaded() { return; }
         for (id, rect) in &self.pane_hits {
-            if let (Some(pane), Some(ws)) = (self.panes.root.find_pane(*id), self.ws_for_rect(*rect)) {
-                pane.terminal.resize(ws);
+            if let Some(pane) = self.panes.root.find_pane(*id) {
+                pane.terminal.resize(self.ws_for_rect(*rect));
             }
         }
     }
@@ -514,9 +483,7 @@ impl TerminalWindow {
     }
 
     fn redraw(&self) {
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.window.request_redraw();
     }
 
     fn focused_terminal(&self) -> Option<&Terminal> {
@@ -528,19 +495,16 @@ impl TerminalWindow {
         let target = if self.focused && !self.shade.is_shaded() {
             (!self.panes.is_empty()).then_some(self.panes.focused)
         } else { None };
-        if self.ime.set_target(target)
-            && let Some(window) = &self.window {
-            window.set_ime_allowed(false);
-            window.set_ime_allowed(target.is_some());
+        if self.ime.set_target(target) {
+            self.window.set_ime_allowed(false);
+            self.window.set_ime_allowed(target.is_some());
         }
     }
 
     fn cancel_ime(&mut self) {
         self.ime.reset();
-        if let Some(window) = &self.window {
-            window.set_ime_allowed(false);
-            window.set_ime_allowed(self.focused && !self.shade.is_shaded());
-        }
+        self.window.set_ime_allowed(false);
+        self.window.set_ime_allowed(self.focused && !self.shade.is_shaded());
         self.redraw();
     }
 
@@ -586,11 +550,9 @@ impl TerminalWindow {
         self.update_titles();
         self.update_layout();
         self.sync_ime_target();
-        let (Some(window), Some(surface), Some(renderer)) =
-            (self.window.as_ref(), self.surface.as_mut(), self.renderer.as_mut())
-        else {
-            return;
-        };
+        let window = &self.window;
+        let surface = &mut self.surface;
+        let renderer = &mut self.renderer;
 
         let size = window.inner_size();
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -690,7 +652,7 @@ impl TerminalWindow {
             SplitDir::Vertical => half.w = (half.w - self.splitter_width()).max(0) / 2,
             SplitDir::Horizontal => half.h = (half.h - self.splitter_width()).max(0) / 2,
         }
-        let Some(renderer) = &self.renderer else { return };
+        let renderer = &self.renderer;
         let grid = renderer.grid_rect(half);
         // Do not create an unreadable terminal or spawn a PTY for a rejected split.
         if grid.w < renderer.cell_w as i32 * 12 || grid.h < renderer.cell_h as i32 * 3 { return; }
@@ -776,9 +738,8 @@ impl TerminalWindow {
     }
 
     fn render_settings(&mut self) {
-        let (Some(st), Some(renderer)) = (self.settings.as_mut(), self.renderer.as_mut()) else {
-            return;
-        };
+        let Some(st) = self.settings.as_mut() else { return };
+        let renderer = &mut self.renderer;
         let size = st.window.inner_size();
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
@@ -817,10 +778,8 @@ impl TerminalWindow {
     }
 
     fn toggle_bitmap_text(&mut self) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.bitmap_text = !renderer.bitmap_text;
-            config::save_bitmap_text(renderer.bitmap_text);
-        }
+        self.renderer.bitmap_text = !self.renderer.bitmap_text;
+        config::save_bitmap_text(self.renderer.bitmap_text);
         self.redraw();
         if let Some(st) = &self.settings { st.window.request_redraw(); }
     }
@@ -940,7 +899,7 @@ impl TerminalWindow {
 
     fn handle_mouse_press(&mut self) {
         let (x, y) = self.cursor_pos;
-        let Some(window) = self.window.as_ref().cloned() else { return };
+        let window = self.window.clone();
 
         if self.layout.close_box.contains(x, y) {
             self.close_window();
@@ -1005,7 +964,7 @@ impl TerminalWindow {
     }
 
     fn selection_point(&self, id: PaneId) -> Option<(Point, CellSide)> {
-        let renderer = self.renderer.as_ref()?;
+        let renderer = &self.renderer;
         let rect = self.pane_hits.iter().find(|(pid, _)| *pid == id)?.1;
         let grid = renderer.grid_rect(rect);
         let pane = self.panes.root.find_pane(id)?;
@@ -1025,18 +984,15 @@ impl TerminalWindow {
     }
 
     fn toggle_shade(&mut self) {
-        if let Some(window) = &self.window {
-            self.shade.toggle(window, window.scale_factor(), Some(LogicalSize::new(320.0, 200.0)));
-        }
+        self.shade.toggle(&self.window, self.window.scale_factor(), Some(LogicalSize::new(320.0, 200.0)));
         self.cancel_pointer_gestures();
         self.refresh();
     }
 
     fn scrollbar_for(&self, id: PaneId) -> Option<ScrollbarLayout> {
-        let renderer = self.renderer.as_ref()?;
         let (_, rect) = self.pane_hits.iter().find(|(pane, _)| *pane == id)?;
         let pane = self.panes.root.find_pane(id)?;
-        Some(renderer.scrollbar_layout(*rect, &pane.terminal.term.lock()))
+        Some(self.renderer.scrollbar_layout(*rect, &pane.terminal.term.lock()))
     }
 
     fn scroll_pane(&self, id: PaneId, delta: i32) {
@@ -1055,7 +1011,7 @@ impl TerminalWindow {
         // A disabled scrollbar still consumes clicks; it must not select terminal text.
         let Some(part) = bar.hit_test(x, y) else { return true };
         let lines = self.ws_for_rect(self.pane_hits.iter().find(|(pane, _)| *pane == id).unwrap().1)
-            .map_or(1, |ws| ws.num_lines.saturating_sub(1).max(1) as i32);
+            .num_lines.saturating_sub(1).max(1) as i32;
         let amount = match part {
             ScrollbarPart::Up => 1,
             ScrollbarPart::Down => -1,
@@ -1141,7 +1097,7 @@ impl TerminalWindow {
     }
 
     fn handle_pane_drag(&mut self) {
-        let scale = self.renderer.as_ref().map(|r| r.scale).unwrap_or(1.0);
+        let scale = self.renderer.scale;
         let Some(MouseDrag::Pane(pd)) = &self.drag else { return };
         let (x, y) = self.cursor_pos;
         let (px, py) = pd.press_pos;
@@ -1188,7 +1144,13 @@ impl TerminalWindow {
 }
 
 impl TerminalWindow {
-    pub fn open(&mut self, event_loop: &ActiveEventLoop, position: Option<PhysicalPosition<i32>>) -> Result<(), String> {
+    pub fn open(
+        proxy: EventLoopProxy<UserEvent>,
+        initial_directory: PathBuf,
+        event_loop: &ActiveEventLoop,
+        position: Option<PhysicalPosition<i32>>,
+    ) -> Result<Self, String> {
+        let scheme_index = theme::scheme_index(&config::load_scheme().unwrap_or_default());
         let mut attrs = Window::default_attributes()
             .with_title(DEFAULT_TITLE)
             .with_decorations(false)
@@ -1197,22 +1159,41 @@ impl TerminalWindow {
         if let Some(position) = position { attrs = attrs.with_position(position); }
         let window = Rc::new(event_loop.create_window(attrs).map_err(|error| error.to_string())?);
 
-        let mut renderer = Renderer::new(window.scale_factor());
-        renderer.bitmap_text = config::load_bitmap_text();
-        self.renderer = Some(renderer);
+        let renderer = Renderer::new(window.scale_factor(), config::load_bitmap_text());
 
         let context = softbuffer::Context::new(window.clone()).map_err(|error| error.to_string())?;
         let surface =
             softbuffer::Surface::new(&context, window.clone()).map_err(|error| error.to_string())?;
-        self._context = Some(context);
-        self.surface = Some(surface);
-        self.window = Some(window);
 
-        let pane = self.new_pane().ok_or("初期ペイン作成失敗")?;
-        self.panes = Panes::new(pane);
-        self.refresh();
-        if let Some(window) = &self.window { window.focus_window(); }
-        Ok(())
+        let mut this = Self {
+            proxy,
+            window,
+            _context: context,
+            surface,
+            renderer,
+            panes: Panes::default(),
+            initial_directory,
+            layout: Layout::default(),
+            pane_hits: Vec::new(),
+            splitter_hits: Vec::new(),
+            drag: None,
+            modifiers: ModifiersState::default(),
+            cursor_pos: (0.0, 0.0),
+            focused: true,
+            scheme_index,
+            settings: None,
+            last_click: None,
+            ime: ime::ImeState::default(),
+            shade: window_shade::WindowShade::default(),
+            bells: Vec::new(),
+            scrollbar_drag: None,
+            scroll_repeat: None,
+        };
+        let pane = this.new_pane().ok_or("初期ペイン作成失敗")?;
+        this.panes = Panes::new(pane);
+        this.refresh();
+        this.window.focus_window();
+        Ok(this)
     }
 
     pub fn terminal_event(&mut self, pane: PaneId, event: TermEvent) {
@@ -1240,7 +1221,7 @@ impl TerminalWindow {
                     .pane_hits
                     .iter()
                     .find(|(id, _)| *id == pane)
-                    .and_then(|(_, rect)| self.ws_for_rect(*rect));
+                    .map(|(_, rect)| self.ws_for_rect(*rect));
                 if let Some(ws) = ws
                     && let Some(p) = self.panes.root.find_pane(pane) {
                     p.terminal.write(format(ws).into_bytes());
@@ -1265,17 +1246,15 @@ impl TerminalWindow {
             self.handle_settings_event(event);
             return;
         }
-        if !self.window.as_ref().is_some_and(|window| window.id() == window_id) { return; }
+        if self.window.id() != window_id { return; }
         match event {
             WindowEvent::CloseRequested => {
                 self.close_window();
             }
             WindowEvent::Resized(_) => self.refresh(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                let mut renderer = Renderer::new(scale_factor);
-                renderer.bitmap_text = config::load_bitmap_text();
-                self.renderer = Some(renderer);
-                if let Some(window) = &self.window { self.shade.update_scale(window, scale_factor); }
+                self.renderer = Renderer::new(scale_factor, config::load_bitmap_text());
+                self.shade.update_scale(&self.window, scale_factor);
                 self.refresh();
             }
             WindowEvent::Focused(focused) => {
@@ -1317,7 +1296,7 @@ impl TerminalWindow {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0) as i32,
                     MouseScrollDelta::PixelDelta(pos) => {
-                        let ch = self.renderer.as_ref().map(|r| r.cell_h).unwrap_or(16) as f64;
+                        let ch = self.renderer.cell_h as f64;
                         (pos.y / ch).round() as i32
                     }
                 };

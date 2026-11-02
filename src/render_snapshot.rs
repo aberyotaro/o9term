@@ -56,8 +56,7 @@ fn render_snapshot() {
         for bitmap in [false, true] {
             for (scheme_index, scheme) in theme::SCHEMES.iter().enumerate() {
                 let tag = format!("s{scale}-b{bitmap}-{}", scheme.id);
-                let mut r = Renderer::new(scale);
-                r.bitmap_text = bitmap;
+                let mut r = Renderer::new(scale, bitmap);
                 let (w, h) = ((640.0 * scale) as u32, (420.0 * scale) as u32);
                 let layout = Layout::compute(w, h, scale);
                 let mut buf = vec![0u32; (w * h) as usize];
