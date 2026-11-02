@@ -265,6 +265,53 @@ mod click_tests {
     }
 }
 
+/// ホイール 1 イベントぶんを行数にする。トラックパッドの PixelDelta は 1 イベントが
+/// 1 行に満たないので、端数を `remainder` に持ち越して次のイベントで足す。
+fn wheel_lines(delta: MouseScrollDelta, cell_h: f64, remainder: &mut f64) -> i32 {
+    let total = *remainder + match delta {
+        MouseScrollDelta::LineDelta(_, y) => y as f64 * 3.0,
+        MouseScrollDelta::PixelDelta(pos) => pos.y / cell_h,
+    };
+    let lines = total.trunc();
+    *remainder = total - lines;
+    lines as i32
+}
+
+/// 代替スクリーン (less, vim など) にはスクロールバックが無いので、
+/// ホイールを矢印キーに変えてアプリへ送る。正の `lines` は上方向。
+fn alternate_scroll_bytes(lines: i32, app_cursor: bool) -> Vec<u8> {
+    let arrow = if lines > 0 { b'A' } else { b'B' };
+    let prefix = if app_cursor { b'O' } else { b'[' };
+    [0x1b, prefix, arrow].repeat(lines.unsigned_abs() as usize)
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    #[test]
+    fn a_line_tick_scrolls_three_lines() {
+        let mut rest = 0.0;
+        assert_eq!(wheel_lines(MouseScrollDelta::LineDelta(0.0, 1.0), 20.0, &mut rest), 3);
+        assert_eq!(wheel_lines(MouseScrollDelta::LineDelta(0.0, -1.0), 20.0, &mut rest), -3);
+    }
+
+    #[test]
+    fn small_pixel_deltas_add_up_to_a_line() {
+        let mut rest = 0.0;
+        let px = |y| MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, y));
+        let lines: Vec<i32> = (0..8).map(|_| wheel_lines(px(6.0), 20.0, &mut rest)).collect();
+        assert_eq!(lines, [0, 0, 0, 1, 0, 0, 1, 0]);
+        assert_eq!(wheel_lines(px(-48.0), 20.0, &mut rest), -2);
+    }
+
+    #[test]
+    fn alternate_scroll_sends_arrows_in_the_cursor_key_mode() {
+        assert_eq!(alternate_scroll_bytes(2, false), b"\x1b[A\x1b[A");
+        assert_eq!(alternate_scroll_bytes(-1, true), b"\x1bOB");
+    }
+}
+
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
@@ -375,6 +422,8 @@ pub struct TerminalWindow {
     bells: Vec<(PaneId, Instant)>,
     scrollbar_drag: Option<(PaneId, f64)>,
     scroll_repeat: Option<ScrollRepeat>,
+    /// トラックパッドのスクロールで、まだ 1 行に満たない端数。
+    wheel_remainder: f64,
 }
 
 /// 入力が届いたとき、選択を解除して表示を最下行へ戻す。
@@ -1189,6 +1238,7 @@ impl TerminalWindow {
             bells: Vec::new(),
             scrollbar_drag: None,
             scroll_repeat: None,
+            wheel_remainder: 0.0,
         };
         let pane = this.new_pane().ok_or("初期ペイン作成失敗")?;
         this.panes = Panes::new(pane);
@@ -1290,13 +1340,7 @@ impl TerminalWindow {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => (y * 3.0) as i32,
-                    MouseScrollDelta::PixelDelta(pos) => {
-                        let ch = self.renderer.cell_h as f64;
-                        (pos.y / ch).round() as i32
-                    }
-                };
+                let lines = wheel_lines(delta, self.renderer.cell_h as f64, &mut self.wheel_remainder);
                 if lines != 0 {
                     // カーソル直下のペインへ、なければフォーカス中ペインへ
                     let (x, y) = self.cursor_pos;
@@ -1306,7 +1350,14 @@ impl TerminalWindow {
                         .or_else(|| (!self.panes.is_empty()).then_some(self.panes.focused));
                     if let Some(id) = target
                         && let Some(p) = self.panes.root.find_pane(id) {
-                        p.terminal.term.lock().scroll_display(Scroll::Delta(lines));
+                        let mut term = p.terminal.term.lock();
+                        let mode = *term.mode();
+                        if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+                            drop(term);
+                            p.terminal.write(alternate_scroll_bytes(lines, mode.contains(TermMode::APP_CURSOR)));
+                        } else {
+                            term.scroll_display(Scroll::Delta(lines));
+                        }
                     }
                     self.redraw();
                 }
