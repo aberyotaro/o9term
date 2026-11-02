@@ -194,6 +194,77 @@ mod key_tests {
     }
 }
 
+/// 直前のクリック。同じセルへの連打を数える。
+#[derive(Clone, Copy)]
+struct ClickState {
+    pane: PaneId,
+    point: Point,
+    at: Instant,
+    count: u8,
+}
+
+const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(400);
+
+/// 今回のクリックが何連打目か (1..=3、3 の次は 1 に戻る)。
+fn next_click_count(prev: Option<&ClickState>, pane: PaneId, point: Point, now: Instant) -> u8 {
+    prev.filter(|click| {
+        click.pane == pane && click.point == point && now.duration_since(click.at) < MULTI_CLICK_WINDOW
+    })
+    .map_or(1, |click| click.count % 3 + 1)
+}
+
+#[cfg(test)]
+mod click_tests {
+    use super::*;
+    use alacritty_terminal::index::Line;
+
+    fn point(line: i32, col: usize) -> Point {
+        Point::new(Line(line), Column(col))
+    }
+
+    fn click(pane: PaneId, point: Point, at: Instant, count: u8) -> ClickState {
+        ClickState { pane, point, at, count }
+    }
+
+    #[test]
+    fn first_click_counts_one() {
+        assert_eq!(next_click_count(None, 1, point(0, 0), Instant::now()), 1);
+    }
+
+    #[test]
+    fn repeated_clicks_on_the_same_cell_count_up_and_wrap_after_three() {
+        let t0 = Instant::now();
+        let p = point(2, 5);
+        let mut prev = None;
+        let mut counts = Vec::new();
+        for i in 0..5 {
+            let now = t0 + Duration::from_millis(100 * i);
+            let count = next_click_count(prev.as_ref(), 1, p, now);
+            counts.push(count);
+            prev = Some(click(1, p, now, count));
+        }
+        assert_eq!(counts, [1, 2, 3, 1, 2]);
+    }
+
+    #[test]
+    fn a_different_cell_or_pane_restarts_the_count() {
+        let t0 = Instant::now();
+        let prev = click(1, point(0, 0), t0, 2);
+        let now = t0 + Duration::from_millis(50);
+        assert_eq!(next_click_count(Some(&prev), 1, point(0, 1), now), 1);
+        assert_eq!(next_click_count(Some(&prev), 1, point(1, 0), now), 1);
+        assert_eq!(next_click_count(Some(&prev), 2, point(0, 0), now), 1);
+    }
+
+    #[test]
+    fn clicks_400ms_apart_restart_the_count() {
+        let t0 = Instant::now();
+        let prev = click(1, point(0, 0), t0, 1);
+        assert_eq!(next_click_count(Some(&prev), 1, point(0, 0), t0 + Duration::from_millis(399)), 2);
+        assert_eq!(next_click_count(Some(&prev), 1, point(0, 0), t0 + Duration::from_millis(400)), 1);
+    }
+}
+
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
@@ -298,7 +369,7 @@ pub struct TerminalWindow {
     focused: bool,
     scheme_index: usize,
     settings: Option<SettingsState>,
-    last_click: Option<(PaneId, Point, Instant, u8)>,
+    last_click: Option<ClickState>,
     ime: ime::ImeState,
     shade: window_shade::WindowShade,
     bells: Vec<(PaneId, Instant)>,
@@ -640,7 +711,7 @@ impl TerminalWindow {
         self.cancel_pointer_gestures();
         self.panes.close(id);
         self.bells.retain(|(pane, _)| *pane != id);
-        self.last_click = self.last_click.filter(|(pane, _, _, _)| *pane != id);
+        self.last_click = self.last_click.filter(|click| click.pane != id);
         self.refresh();
     }
 
@@ -917,10 +988,8 @@ impl TerminalWindow {
             }
             if let Some((point, side)) = self.selection_point(id) {
                 let now = Instant::now();
-                let count = self.last_click.filter(|(pid, p, t, _)|
-                    *pid == id && *p == point && now.duration_since(*t) < Duration::from_millis(400))
-                    .map_or(1, |(_, _, _, n)| n % 3 + 1);
-                self.last_click = Some((id, point, now, count));
+                let count = next_click_count(self.last_click.as_ref(), id, point, now);
+                self.last_click = Some(ClickState { pane: id, point, at: now, count });
                 let ty = match count {
                     2 => SelectionType::Semantic,
                     3 => SelectionType::Lines,
