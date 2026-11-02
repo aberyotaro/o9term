@@ -381,9 +381,6 @@ impl TerminalWindow {
     fn update_titles(&mut self) {
         let home = std::env::var("HOME").unwrap_or_default();
         self.panes.root.for_each_pane_mut(&mut |pane| {
-            if std::env::var("OS9_DEBUG").is_ok() {
-                eprintln!("[debug] pane={} cwd={:?}", pane.id, pane.terminal.cwd());
-            }
             let Some(cwd) = pane.terminal.cwd() else { return };
             let path = cwd.to_string_lossy();
             pane.title = match path.strip_prefix(&home) {
@@ -636,7 +633,6 @@ impl TerminalWindow {
         }
         let hits =
             renderer.draw_settings(&mut buffer, size.width, size.height, &layout, self.scheme_index);
-        st.layout = layout;
         st.row_hits = hits;
         let _ = buffer.present();
     }
@@ -904,9 +900,7 @@ impl TerminalWindow {
         if let Some(window) = &self.window {
             self.shade.toggle(window, window.scale_factor(), Some(LogicalSize::new(320.0, 200.0)));
         }
-        self.drag = None;
-        self.scrollbar_drag = None;
-        self.scroll_repeat = None;
+        self.cancel_pointer_gestures();
         self.refresh();
     }
 
@@ -1029,7 +1023,7 @@ impl TerminalWindow {
             return;
         }
         let source = pd.pane;
-        let target = self.pane_drop_target(Some(source));
+        let target = self.pane_drop_target(source);
         if let Some(MouseDrag::Pane(pd)) = &mut self.drag {
             pd.started = true;
             pd.target = target;
@@ -1049,10 +1043,10 @@ impl TerminalWindow {
         self.redraw();
     }
 
-    fn pane_drop_target(&self, exclude: Option<PaneId>) -> Option<DropTarget> {
+    fn pane_drop_target(&self, exclude: PaneId) -> Option<DropTarget> {
         let (x, y) = self.cursor_pos;
         let (id, rect) = self.pane_hits.iter()
-            .find(|(id, r)| Some(*id) != exclude && r.contains(x, y))?;
+            .find(|(id, r)| *id != exclude && r.contains(x, y))?;
         let nx = (x - rect.x as f64) / rect.w.max(1) as f64;
         let ny = (y - rect.y as f64) / rect.h.max(1) as f64;
         let side = [
@@ -1162,9 +1156,7 @@ impl TerminalWindow {
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 if !focused {
-                    self.drag = None;
-                    self.scrollbar_drag = None;
-                    self.scroll_repeat = None;
+                    self.cancel_pointer_gestures();
                     self.modifiers = ModifiersState::default();
                 }
                 self.redraw();

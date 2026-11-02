@@ -461,8 +461,7 @@ impl Renderer {
             self.draw_control_box(buf, w, h, layout.collapse_box, BoxKind::Collapse);
         }
 
-        let clip = Rect { x: 0, y: 0, w, h };
-        self.draw_title_text(buf, w, h, title, title_x, baseline, color, clip);
+        self.draw_title_text(buf, w, h, title, title_x, baseline, color);
     }
 
     fn draw_control_box(&self, buf: &mut [u32], w: i32, h: i32, r: Rect, kind: BoxKind) {
@@ -510,11 +509,10 @@ impl Renderer {
         let scale = self.scale;
         let s = move |v: f32| ((v as f64 * scale).round() as i32).max(1);
         let c = layout.content;
-        let clip = Rect { x: 0, y: 0, w, h };
 
         let ascent = self.title_face.ascent().round() as i32;
 
-        self.draw_title_text(buf, w, h, "カラースキーマ:", c.x, c.y + ascent, theme::TITLE_TEXT, clip);
+        self.draw_title_text(buf, w, h, "カラースキーマ:", c.x, c.y + ascent, theme::TITLE_TEXT);
 
         let row_h = s(24.0);
         let mut hits = Vec::with_capacity(theme::SCHEMES.len());
@@ -538,7 +536,6 @@ impl Renderer {
                 row.x + s(22.0),
                 cy + ascent / 2 - s(1.0),
                 theme::TITLE_TEXT,
-                clip,
             );
 
             // 右端に配色見本 (背景・文字・赤・緑・青)
@@ -569,7 +566,7 @@ impl Renderer {
                 fill_rect(buf, w, h, checkbox.x + s(dx), checkbox.y + s(dy), s(1.0), s(2.0), theme::BOX_BORDER);
             }
         }
-        self.draw_title_text(buf, w, h, "ビットマップ風の文字", row.x + s(22.0), cy + ascent / 2 - s(1.0), theme::TITLE_TEXT, clip);
+        self.draw_title_text(buf, w, h, "ビットマップ風の文字", row.x + s(22.0), cy + ascent / 2 - s(1.0), theme::TITLE_TEXT);
         hits.push(row);
         hits
     }
@@ -616,8 +613,8 @@ impl Renderer {
                 continue;
             }
 
-            let mut fg = resolve_color(colors, cell.fg, true, scheme);
-            let mut bg = resolve_color(colors, cell.bg, false, scheme);
+            let mut fg = resolve_color(colors, cell.fg, scheme);
+            let mut bg = resolve_color(colors, cell.bg, scheme);
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
@@ -718,8 +715,8 @@ impl Renderer {
         x: i32,
         baseline: i32,
         color: u32,
-        clip: Rect,
     ) {
+        let clip = Rect { x: 0, y: 0, w, h };
         let mut pen = x as f32;
         for c in text.chars() {
             let glyph = self.title_glyphs.entry(c).or_insert_with(|| self.title_face.rasterize(c));
@@ -743,13 +740,13 @@ fn pack(rgb: Rgb) -> u32 {
     ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32
 }
 
-fn resolve_color(colors: &Colors, color: Color, is_fg: bool, scheme: &Scheme) -> u32 {
+fn resolve_color(colors: &Colors, color: Color, scheme: &Scheme) -> u32 {
     match color {
         Color::Spec(rgb) => pack(rgb),
         Color::Indexed(i) if i < 16 => colors[i as usize].map(pack).unwrap_or(scheme.ansi[i as usize]),
         Color::Indexed(i) => colors[i as usize].map(pack).unwrap_or_else(|| theme::indexed256(i)),
         Color::Named(named) => {
-            let fallback = named_fallback(named, is_fg, scheme);
+            let fallback = named_fallback(named, scheme);
             colors[named as usize].map(pack).unwrap_or(fallback)
         }
     }
@@ -759,7 +756,7 @@ fn resolve_named(colors: &Colors, named: NamedColor, fallback: u32) -> u32 {
     colors[named as usize].map(pack).unwrap_or(fallback)
 }
 
-fn named_fallback(named: NamedColor, is_fg: bool, scheme: &Scheme) -> u32 {
+fn named_fallback(named: NamedColor, scheme: &Scheme) -> u32 {
     use NamedColor::*;
     match named {
         Foreground | BrightForeground => scheme.fg,
@@ -769,16 +766,7 @@ fn named_fallback(named: NamedColor, is_fg: bool, scheme: &Scheme) -> u32 {
         DimBlack | DimRed | DimGreen | DimYellow | DimBlue | DimMagenta | DimCyan | DimWhite => {
             dim(scheme.ansi[named as usize - DimBlack as usize])
         }
-        _ => {
-            let idx = named as usize;
-            if idx < 16 {
-                scheme.ansi[idx]
-            } else if is_fg {
-                scheme.fg
-            } else {
-                scheme.bg
-            }
-        }
+        _ => scheme.ansi[named as usize],
     }
 }
 

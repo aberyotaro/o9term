@@ -157,19 +157,6 @@ impl<T> PaneNode<T> {
         }
     }
 
-    /// `id` のペインを閉じ、残った木を縮約する。
-    pub fn remove_pane(&mut self, id: PaneId) -> bool {
-        self.take_pane(id).is_some()
-    }
-
-    pub fn pane_count(&self) -> usize {
-        match self {
-            PaneNode::Empty => 0,
-            PaneNode::Leaf(_) => 1,
-            PaneNode::Split { first, second, .. } => first.pane_count() + second.pane_count(),
-        }
-    }
-
     pub fn find_pane(&self, id: PaneId) -> Option<&Pane<T>> {
         match self {
             PaneNode::Leaf(pane) if pane.id == id => Some(pane),
@@ -234,12 +221,12 @@ impl<T> Panes<T> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.root.pane_count() == 0
+        matches!(self.root, PaneNode::Empty)
     }
 
     /// ペインを閉じ、フォーカスが消えた場合は残った最初のペインに移す。
     pub fn close(&mut self, id: PaneId) -> bool {
-        if !self.root.remove_pane(id) {
+        if self.root.take_pane(id).is_none() {
             return false;
         }
         if !self.root.contains(self.focused) {

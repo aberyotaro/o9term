@@ -19,12 +19,12 @@ pub const SUNKEN_LIGHT: u32 = 0xFFFFFF; // コンテンツ領域の窪み(右下
 
 // ─── 端末コンテンツ ───
 // クラシックMacらしく白地に黒文字をデフォルトにする
-pub const CONTENT_BG: u32 = 0xFFFFFF;
-pub const CONTENT_FG: u32 = 0x000000;
-pub const CURSOR: u32 = 0x000000;
+const CONTENT_BG: u32 = 0xFFFFFF;
+const CONTENT_FG: u32 = 0x000000;
+const CURSOR: u32 = 0x000000;
 
 /// ANSI 16色。白背景でも読めるよう Terminal.app のクラシック値に寄せている。
-pub const ANSI16: [u32; 16] = [
+const ANSI16: [u32; 16] = [
     0x000000, // black
     0xCC0000, // red
     0x00A600, // green
@@ -112,12 +112,9 @@ pub fn scheme_index(id: &str) -> usize {
     SCHEMES.iter().position(|s| s.id == id).unwrap_or(0)
 }
 
-/// xterm 256色パレットの既定値を返す。
+/// xterm 256色パレットの既定値を返す。16 以上のみ (0..16 はスキーマの ansi)。
 pub fn indexed256(i: u8) -> u32 {
     let i = i as u32;
-    if i < 16 {
-        return ANSI16[i as usize];
-    }
     if i < 232 {
         // 6x6x6 カラーキューブ
         let i = i - 16;

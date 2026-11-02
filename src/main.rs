@@ -4,7 +4,6 @@ mod clipboard;
 mod config;
 mod font;
 mod ime;
-#[cfg(target_os = "macos")]
 mod instance;
 mod renderer;
 mod panes;
@@ -63,10 +62,7 @@ fn main() {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("イベントループ作成失敗");
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    #[cfg(target_os = "macos")]
     let _instance = instance::install(proxy.clone(), directory.clone());
-    #[cfg(not(target_os = "macos"))]
-    let _ = proxy.send_event(UserEvent::NewWindow(directory));
     let mut app = App { proxy, windows: Vec::new(), active_window: None };
     event_loop.run_app(&mut app).expect("イベントループ実行失敗");
 }

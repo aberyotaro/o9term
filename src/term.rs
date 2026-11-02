@@ -141,16 +141,12 @@ impl Terminal {
         });
         let _ = self.sender.send(Msg::Resize(ws));
     }
-
-    pub fn shutdown(&self) {
-        let _ = self.sender.send(Msg::Shutdown);
-    }
 }
 
 impl Drop for Terminal {
     fn drop(&mut self) {
         // ペインやウィンドウを閉じたとき、PTY の読み書きスレッドを確実に止める
-        self.shutdown();
+        let _ = self.sender.send(Msg::Shutdown);
     }
 }
 
@@ -214,6 +210,32 @@ fn child_pids(ppid: i32) -> Vec<i32> {
     buf[..n].iter().copied().filter(|&pid| pid > 0).collect()
 }
 
+fn proc_cwd(pid: i32) -> Option<PathBuf> {
+    let mut info = ProcVnodePathInfo {
+        cdir: VnodeInfoPath { vnode_info: [0; 152], path: [0; MAXPATHLEN] },
+        rdir: VnodeInfoPath { vnode_info: [0; 152], path: [0; MAXPATHLEN] },
+    };
+    let size = std::mem::size_of::<ProcVnodePathInfo>() as std::os::raw::c_int;
+    let ret = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            &mut info as *mut _ as *mut std::os::raw::c_void,
+            size,
+        )
+    };
+    if ret != size {
+        return None;
+    }
+    let path = &info.cdir.path;
+    let len = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+    if len == 0 {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf8_lossy(&path[..len]).into_owned()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{next_pane_id, proc_cwd};
@@ -253,30 +275,4 @@ mod tests {
         // /tmp は /private/tmp へのシンボリックリンク
         assert_eq!(actual.expect("proc_cwd が失敗"), std::path::PathBuf::from("/private/tmp"));
     }
-}
-
-fn proc_cwd(pid: i32) -> Option<PathBuf> {
-    let mut info = ProcVnodePathInfo {
-        cdir: VnodeInfoPath { vnode_info: [0; 152], path: [0; MAXPATHLEN] },
-        rdir: VnodeInfoPath { vnode_info: [0; 152], path: [0; MAXPATHLEN] },
-    };
-    let size = std::mem::size_of::<ProcVnodePathInfo>() as std::os::raw::c_int;
-    let ret = unsafe {
-        proc_pidinfo(
-            pid,
-            PROC_PIDVNODEPATHINFO,
-            0,
-            &mut info as *mut _ as *mut std::os::raw::c_void,
-            size,
-        )
-    };
-    if ret != size {
-        return None;
-    }
-    let path = &info.cdir.path;
-    let len = path.iter().position(|&b| b == 0).unwrap_or(path.len());
-    if len == 0 {
-        return None;
-    }
-    Some(PathBuf::from(String::from_utf8_lossy(&path[..len]).into_owned()))
 }
