@@ -46,7 +46,8 @@ impl Face {
         (self.font.ascent() + self.font.descent() + self.font.leading()) as f32
     }
 
-    pub fn rasterize(&self, c: char) -> Glyph {
+    /// `c` を描くフォント (無ければフォールバック先)、そのグリフ番号、送り幅。
+    fn lookup(&self, c: char) -> (CTFont, u16, f32) {
         let mut units = [0u16; 2];
         let units = c.encode_utf16(&mut units);
         let string = CFString::new(c.encode_utf8(&mut [0; 4]));
@@ -62,7 +63,15 @@ impl Face {
         let glyph = glyphs[0];
         let mut advance = CGSize::new(0.0, 0.0);
         unsafe { font.get_advances_for_glyphs(kCTFontOrientationDefault, &glyph, &mut advance, 1) };
-        let advance = advance.width as f32;
+        (font, glyph, advance.width as f32)
+    }
+
+    pub fn advance(&self, c: char) -> f32 {
+        self.lookup(c).2
+    }
+
+    pub fn rasterize(&self, c: char) -> Glyph {
+        let (font, glyph, advance) = self.lookup(c);
 
         let bounds = font.get_bounding_rects_for_glyphs(kCTFontOrientationDefault, &[glyph]);
         let left = bounds.origin.x.floor();

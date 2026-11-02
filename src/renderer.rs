@@ -2,6 +2,7 @@
 //! softbuffer のピクセルバッファへ直接描画する。
 
 use std::collections::HashMap;
+use std::hash::Hash;
 
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::event::EventListener;
@@ -181,17 +182,34 @@ impl Layout {
     }
 }
 
-pub struct Renderer {
+/// 字体と、その字体でラスタライズ済みのグリフ。
+struct GlyphCache<K> {
     face: Face,
-    title_face: Face,
+    glyphs: HashMap<K, Glyph>,
+}
+
+impl<K: Hash + Eq> GlyphCache<K> {
+    fn new(face: Face) -> Self {
+        Self { face, glyphs: HashMap::new() }
+    }
+
+    /// `key` のグリフを返す。無ければ `make` で作って覚える。
+    fn get(&mut self, key: K, make: impl FnOnce(&Face) -> Glyph) -> &Glyph {
+        let face = &self.face;
+        self.glyphs.entry(key).or_insert_with(|| make(face))
+    }
+}
+
+pub struct Renderer {
+    /// 端末本文。キーは文字と網点の位相。
+    body: GlyphCache<(char, (usize, usize))>,
+    title: GlyphCache<char>,
     pub cell_w: usize,
     pub cell_h: usize,
     ascent: i32,
     pub scale: f64,
     /// True のときグリフを二値化し、ビットマップ風の輪郭で描く。
     pub bitmap_text: bool,
-    glyphs: HashMap<(char, (usize, usize)), Glyph>,
-    title_glyphs: HashMap<char, Glyph>,
 }
 
 impl Renderer {
@@ -199,20 +217,18 @@ impl Renderer {
         let face = Face::new(MONACO, (FONT_PT as f64 * scale) as f32);
         let title_face = Face::new(GENEVA, (TITLE_PT as f64 * scale) as f32);
 
-        let cell_w = (face.rasterize('M').advance.round() as usize).max(1);
+        let cell_w = (face.advance('M').round() as usize).max(1);
         let cell_h = (face.line_height().ceil() as usize).max(1);
         let ascent = face.ascent().round() as i32;
 
         Self {
-            face,
-            title_face,
+            body: GlyphCache::new(face),
+            title: GlyphCache::new(title_face),
             cell_w,
             cell_h,
             ascent,
             scale,
             bitmap_text: false,
-            glyphs: HashMap::new(),
-            title_glyphs: HashMap::new(),
         }
     }
 
@@ -413,7 +429,7 @@ impl Renderer {
         let title_w = self.measure_title(title);
         let title_x = tb.x + (tb.w - title_w) / 2;
         let baseline = tb.y + tb.h / 2
-            + (self.title_face.ascent() / 2.0).round() as i32
+            + (self.title.face.ascent() / 2.0).round() as i32
             - self.px(1.0);
         let color = if focused { theme::TITLE_TEXT } else { theme::TITLE_TEXT_INACTIVE };
 
@@ -481,7 +497,7 @@ impl Renderer {
     ) -> Vec<Rect> {
         let c = layout.content;
 
-        let ascent = self.title_face.ascent().round() as i32;
+        let ascent = self.title.face.ascent().round() as i32;
 
         self.draw_title_text(cv, "カラースキーマ:", c.x, c.y + ascent, theme::TITLE_TEXT);
 
@@ -650,10 +666,10 @@ impl Renderer {
         color: u32,
         clip: Rect,
     ) {
-        let (cw, ch, ascent) = (self.cell_w, self.cell_h, self.ascent);
         let phase = font::pattern_phase(c, cell_x, cell_y);
-        let glyph = self.glyphs.entry((c, phase)).or_insert_with(|| {
-            font::block_element(c, cw, ch, ascent, phase).unwrap_or_else(|| self.face.rasterize(c))
+        let glyph = self.body.get((c, phase), |face| {
+            font::block_element(c, self.cell_w, self.cell_h, self.ascent, phase)
+                .unwrap_or_else(|| face.rasterize(c))
         });
         let gx = cell_x + glyph.left;
         let gy = cell_y + self.ascent - glyph.bottom - glyph.height as i32;
@@ -663,7 +679,7 @@ impl Renderer {
     fn measure_title(&mut self, text: &str) -> i32 {
         let mut total = 0.0f32;
         for c in text.chars() {
-            total += self.title_glyphs.entry(c).or_insert_with(|| self.title_face.rasterize(c)).advance;
+            total += self.title.get(c, |face| face.rasterize(c)).advance;
         }
         total.round() as i32
     }
@@ -679,7 +695,7 @@ impl Renderer {
         let clip = cv.bounds();
         let mut pen = x as f32;
         for c in text.chars() {
-            let glyph = self.title_glyphs.entry(c).or_insert_with(|| self.title_face.rasterize(c));
+            let glyph = self.title.get(c, |face| face.rasterize(c));
             let gx = pen.round() as i32 + glyph.left;
             let gy = baseline - glyph.bottom - glyph.height as i32;
             cv.blend_glyph(gx, gy, glyph, color, clip, self.bitmap_text);
