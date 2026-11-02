@@ -41,10 +41,9 @@ fn load() -> Option<String> {
 
 fn save(key: &str, value: &str) {
     let Some(path) = config_path() else { return };
-    if let Some(dir) = path.parent() {
-        if std::fs::create_dir_all(dir).is_err() {
-            return;
-        }
+    if let Some(dir) = path.parent()
+        && std::fs::create_dir_all(dir).is_err() {
+        return;
     }
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let _ = std::fs::write(path, update(&content, key, value));

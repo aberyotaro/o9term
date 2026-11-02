@@ -84,10 +84,9 @@ impl Preedit {
             // In a two-cell pane the final wide glyph and a spare caret cell
             // cannot both fit. Keep the glyph visible and clamp the thin caret
             // to the row's final cell instead of displaying an empty overlay.
-            if let Some((column, glyph_width)) = last_base {
-                if glyph_width <= width {
-                    scroll = column;
-                }
+            if let Some((column, glyph_width)) = last_base
+                && glyph_width <= width {
+                scroll = column;
             }
         }
 

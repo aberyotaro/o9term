@@ -334,11 +334,10 @@ impl TerminalWindow {
         let target = if self.focused && !self.shade.is_shaded() {
             (!self.panes.is_empty()).then_some(self.panes.focused)
         } else { None };
-        if self.ime.set_target(target) {
-            if let Some(window) = &self.window {
-                window.set_ime_allowed(false);
-                window.set_ime_allowed(target.is_some());
-            }
+        if self.ime.set_target(target)
+            && let Some(window) = &self.window {
+            window.set_ime_allowed(false);
+            window.set_ime_allowed(target.is_some());
         }
     }
 
@@ -355,12 +354,11 @@ impl TerminalWindow {
         self.sync_ime_target();
         if let Some(text) = self.ime.update(event) {
             self.write_input(text.into_bytes());
-        } else if self.ime.preedit().is_some() {
-            if let Some(terminal) = self.focused_terminal() {
-                let mut term = terminal.term.lock();
-                term.selection = None;
-                term.scroll_display(Scroll::Bottom);
-            }
+        } else if self.ime.preedit().is_some()
+            && let Some(terminal) = self.focused_terminal() {
+            let mut term = terminal.term.lock();
+            term.selection = None;
+            term.scroll_display(Scroll::Bottom);
         }
         self.redraw();
     }
@@ -454,11 +452,10 @@ impl TerminalWindow {
                     let mut anchor = Rect {
                         x: grid.x + col * cw, y: grid.y + row * ch, w: cw, h: ch,
                     };
-                    if let Some(preedit) = self.ime.preedit() {
-                        if let Some(area) = renderer.draw_preedit(
+                    if let Some(preedit) = self.ime.preedit()
+                        && let Some(area) = renderer.draw_preedit(
                             &mut buffer, size.width, size.height, *rect, &term, preedit, scheme,
                         ) { anchor = area; }
-                    }
                     window.set_ime_cursor_area(
                         PhysicalPosition::new(anchor.x, anchor.y),
                         PhysicalSize::new(anchor.w.max(1) as u32, anchor.h.max(1) as u32),
@@ -475,19 +472,17 @@ impl TerminalWindow {
         renderer.draw_grow_box(&mut buffer, size.width, size.height, self.layout.grow_box);
 
         // ペイン移動中の視覚フィードバック (最前面)。
-        if let Some(MouseDrag::Pane(drag)) = &self.drag {
-            if drag.started {
-                if let Some(DropTarget { pane, side }) = drag.target {
-                    if let Some((_, rect)) = self.pane_hits.iter().find(|(id, _)| *id == pane) {
-                        renderer.draw_drop_outline(&mut buffer, size.width, size.height, side.preview(*rect));
-                    }
-                }
-                let w = (120.0 * renderer.scale) as i32;
-                let h = (36.0 * renderer.scale) as i32;
-                let (x, y) = (self.cursor_pos.0 as i32, self.cursor_pos.1 as i32);
-                renderer.draw_drop_outline(&mut buffer, size.width, size.height,
-                    Rect { x: x - w / 2, y: y - h / 2, w, h });
+        if let Some(MouseDrag::Pane(drag)) = &self.drag
+            && drag.started {
+            if let Some(DropTarget { pane, side }) = drag.target
+                && let Some((_, rect)) = self.pane_hits.iter().find(|(id, _)| *id == pane) {
+                renderer.draw_drop_outline(&mut buffer, size.width, size.height, side.preview(*rect));
             }
+            let w = (120.0 * renderer.scale) as i32;
+            let h = (36.0 * renderer.scale) as i32;
+            let (x, y) = (self.cursor_pos.0 as i32, self.cursor_pos.1 as i32);
+            renderer.draw_drop_outline(&mut buffer, size.width, size.height,
+                Rect { x: x - w / 2, y: y - h / 2, w, h });
         }
 
         let _ = buffer.present();
@@ -959,10 +954,9 @@ impl TerminalWindow {
 
     fn update_selection(&mut self, id: PaneId) {
         if let Some((point, side)) = self.selection_point(id) {
-            if let Some(pane) = self.panes.root.find_pane(id) {
-                if let Some(selection) = pane.terminal.term.lock().selection.as_mut() {
-                    selection.update(point, side);
-                }
+            if let Some(pane) = self.panes.root.find_pane(id)
+                && let Some(selection) = pane.terminal.term.lock().selection.as_mut() {
+                selection.update(point, side);
             }
             self.redraw();
         }
@@ -971,10 +965,9 @@ impl TerminalWindow {
     fn copy_selection(&self) {
         let text = self.focused_terminal()
             .and_then(|terminal| terminal.term.lock().selection_to_string());
-        if let Some(text) = text.filter(|text| !text.is_empty()) {
-            if let Err(error) = clipboard::set(&text) {
-                eprintln!("Copy failed: {error}");
-            }
+        if let Some(text) = text.filter(|text| !text.is_empty())
+            && let Err(error) = clipboard::set(&text) {
+            eprintln!("Copy failed: {error}");
         }
     }
 
@@ -1115,10 +1108,9 @@ impl TerminalWindow {
                     .iter()
                     .find(|(id, _)| *id == pane)
                     .and_then(|(_, rect)| self.ws_for_rect(*rect));
-                if let Some(ws) = ws {
-                    if let Some(p) = self.panes.root.find_pane(pane) {
-                        p.terminal.write(format(ws).into_bytes());
-                    }
+                if let Some(ws) = ws
+                    && let Some(p) = self.panes.root.find_pane(pane) {
+                    p.terminal.write(format(ws).into_bytes());
                 }
             }
             TermEvent::Exit | TermEvent::ChildExit(_) => {
@@ -1184,11 +1176,8 @@ impl TerminalWindow {
             } => {
                 self.scrollbar_drag = None;
                 self.scroll_repeat = None;
-                if let Some(drag) = self.drag.take() {
-                    match drag {
-                        MouseDrag::Pane(pd) => self.finish_pane_drag(pd),
-                        _ => {},
-                    }
+                if let Some(MouseDrag::Pane(pd)) = self.drag.take() {
+                    self.finish_pane_drag(pd);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1208,10 +1197,9 @@ impl TerminalWindow {
                         .find(|(_, r)| r.contains(x, y))
                         .map(|(id, _)| *id)
                         .or_else(|| (!self.panes.is_empty()).then_some(self.panes.focused));
-                    if let Some(id) = target {
-                        if let Some(p) = self.panes.root.find_pane(id) {
-                            p.terminal.term.lock().scroll_display(Scroll::Delta(lines));
-                        }
+                    if let Some(id) = target
+                        && let Some(p) = self.panes.root.find_pane(id) {
+                        p.terminal.term.lock().scroll_display(Scroll::Delta(lines));
                     }
                     self.redraw();
                 }
@@ -1228,17 +1216,16 @@ impl TerminalWindow {
         let had_bells = self.bells.len();
         self.bells.retain(|(_, until)| *until > now);
         if self.bells.len() != had_bells { self.redraw(); }
-        if let Some(mut repeat) = self.scroll_repeat {
-            if now >= repeat.next {
-                if let Some(bar) = self.scrollbar_for(repeat.pane) {
-                    if bar.hit_test(self.cursor_pos.0, self.cursor_pos.1) == Some(repeat.part) {
-                        self.scroll_pane(repeat.pane, repeat.amount);
-                    }
-                    repeat.next = now + Duration::from_millis(65);
-                    self.scroll_repeat = Some(repeat);
-                } else {
-                    self.scroll_repeat = None;
+        if let Some(mut repeat) = self.scroll_repeat
+            && now >= repeat.next {
+            if let Some(bar) = self.scrollbar_for(repeat.pane) {
+                if bar.hit_test(self.cursor_pos.0, self.cursor_pos.1) == Some(repeat.part) {
+                    self.scroll_pane(repeat.pane, repeat.amount);
                 }
+                repeat.next = now + Duration::from_millis(65);
+                self.scroll_repeat = Some(repeat);
+            } else {
+                self.scroll_repeat = None;
             }
         }
         self.bells.iter().map(|(_, until)| *until)
