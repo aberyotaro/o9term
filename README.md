@@ -50,6 +50,49 @@ src/
 
 同じ設定ウィンドウで「ビットマップ風の文字」をオンにすると、文字のアンチエイリアスを無効にできる。
 
+## インストール
+
+配布パッケージ（ZIP）を展開し、中の `install.command` を一度だけ実行します。Rust・Python・Homebrew・ネットワークは不要です。
+
+```sh
+open o9term-0.1.0-macos-arm64/install.command
+```
+
+インストーラーは次のものを置きます。
+
+| 置く場所 | 内容 |
+|---|---|
+| `~/Applications/o9term.app` | アプリ本体 |
+| `~/.local/bin/o9` | 起動コマンド |
+| `~/.config/os9terminal/integration.zsh` | 構文ハイライトなどのzsh連携 |
+| `~/.zshrc` | zsh連携を読み込む1行（`# o9term` の下） |
+| `~/.zprofile` | `~/.local/bin` をPATHに足す1行（`# o9term command` の下） |
+
+`~/.zshrc` と `~/.zprofile` は、初めて書き換える前に `*.os9terminal-backup` としてバックアップします。インストール後は新しいターミナルを開いて `o9` を実行してください。
+
+配布パッケージはソースから作ります。手順は[開発ガイド](docs/development.md)の「Build a release package (maintainers only)」を参照してください。
+
+### 更新する
+
+更新も同じ `install.command` を実行します。それまでのアプリは `~/Applications/o9term.app.previous` として残ります。
+
+`o9term.app.previous` がすでにあると、インストーラーは止まります。その場合は先に `o9term.app.previous` をゴミ箱へ移してから実行してください。
+
+起動中の o9term は古い版のまま動き続けます。Cmd+Q で終了してから開き直すと、新しい版になります。
+
+## アンインストール
+
+1. Cmd+Q で o9term を終了します。
+2. アプリ・起動コマンド・設定をゴミ箱へ移します。
+
+   ```sh
+   mv ~/Applications/o9term.app ~/Applications/o9term.app.previous ~/.local/bin/o9 ~/.config/os9terminal ~/.Trash/
+   ```
+
+   `~/.config/os9terminal` にはzsh連携と、設定ウィンドウで選んだ配色などの `config.toml` が入っています。`o9term.app.previous` が無い場合は、その分だけ「No such file or directory」と表示されます。ほかのものはゴミ箱へ移ります。
+3. `~/.zshrc` から、`# o9term` とその次の行を消します。
+4. `~/.zprofile` から、`# o9term command` とその次の行を消します。ほかのツールのために `~/.local/bin` をPATHに入れている場合は、次の行は残してください。
+
 ## 起動
 
 インストール後は、任意のディレクトリから:
@@ -59,7 +102,7 @@ o9
 ```
 
 そのディレクトリで新しいウィンドウを開きます。`o9 /path/to/project` でディレクトリの指定もできます。起動済みなら同じアプリへウィンドウを追加するため、Dockのアイコンは増えません。入力・コード表示の構文ハイライトも設定済みです。
-開発・配布パッケージの作成については[開発ガイド](docs/development.md)を参照してください。
+開発については[開発ガイド](docs/development.md)を参照してください。
 
 ## 操作
 
