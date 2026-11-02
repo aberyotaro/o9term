@@ -377,6 +377,12 @@ pub struct TerminalWindow {
     scroll_repeat: Option<ScrollRepeat>,
 }
 
+/// 入力が届いたとき、選択を解除して表示を最下行へ戻す。
+fn clear_selection_and_follow(term: &mut alacritty_terminal::Term<term::EventProxy>) {
+    term.selection = None;
+    term.scroll_display(Scroll::Bottom);
+}
+
 impl TerminalWindow {
     pub fn owns_window(&self, id: WindowId) -> bool {
         self.window.id() == id
@@ -410,6 +416,14 @@ impl TerminalWindow {
         self.renderer.bitmap_text = bitmap;
         self.redraw();
         if let Some(settings) = &self.settings { settings.window.request_redraw(); }
+    }
+
+    fn pane_rect(&self, id: PaneId) -> Option<Rect> {
+        self.pane_hits.iter().find(|(pane, _)| *pane == id).map(|(_, rect)| *rect)
+    }
+
+    fn pane_at(&self, x: f64, y: f64) -> Option<(PaneId, Rect)> {
+        self.pane_hits.iter().find(|(_, rect)| rect.contains(x, y)).copied()
     }
 
     fn splitter_width(&self) -> i32 {
@@ -514,20 +528,14 @@ impl TerminalWindow {
             self.write_input(text.into_bytes());
         } else if self.ime.preedit().is_some()
             && let Some(terminal) = self.focused_terminal() {
-            let mut term = terminal.term.lock();
-            term.selection = None;
-            term.scroll_display(Scroll::Bottom);
+            clear_selection_and_follow(&mut terminal.term.lock());
         }
         self.redraw();
     }
 
     fn write_input(&self, bytes: Vec<u8>) {
         if let Some(terminal) = self.focused_terminal() {
-            {
-                let mut term = terminal.term.lock();
-                term.selection = None;
-                term.scroll_display(Scroll::Bottom);
-            }
+            clear_selection_and_follow(&mut terminal.term.lock());
             terminal.write(bytes);
             self.redraw();
         }
@@ -645,9 +653,9 @@ impl TerminalWindow {
 
     fn split(&mut self, side: Side) {
         let target = self.panes.focused;
-        let Some((_, rect)) = self.pane_hits.iter().find(|(id, _)| *id == target) else { return };
+        let Some(rect) = self.pane_rect(target) else { return };
         let (dir, before) = side.split();
-        let mut half = *rect;
+        let mut half = rect;
         match dir {
             SplitDir::Vertical => half.w = (half.w - self.splitter_width()).max(0) / 2,
             SplitDir::Horizontal => half.h = (half.h - self.splitter_width()).max(0) / 2,
@@ -683,9 +691,7 @@ impl TerminalWindow {
 
     /// 方向指定でペインのフォーカスを移す (Cmd+Option+矢印)。
     fn move_focus(&mut self, dx: i32, dy: i32) {
-        let Some((_, cur)) = self.pane_hits.iter().find(|(id, _)| *id == self.panes.focused) else {
-            return;
-        };
+        let Some(cur) = self.pane_rect(self.panes.focused) else { return };
         let (cx, cy) = cur.center();
         let best = self
             .pane_hits
@@ -931,8 +937,7 @@ impl TerminalWindow {
             let _ = window.drag_window();
             return;
         }
-        if let Some((id, _)) = self.pane_hits.iter().find(|(_, r)| r.contains(x, y)) {
-            let id = *id;
+        if let Some((id, _)) = self.pane_at(x, y) {
             self.panes.focused = id;
             if self.modifiers.super_key() {
                 self.last_click = None;
@@ -965,7 +970,7 @@ impl TerminalWindow {
 
     fn selection_point(&self, id: PaneId) -> Option<(Point, CellSide)> {
         let renderer = &self.renderer;
-        let rect = self.pane_hits.iter().find(|(pid, _)| *pid == id)?.1;
+        let rect = self.pane_rect(id)?;
         let grid = renderer.grid_rect(rect);
         let pane = self.panes.root.find_pane(id)?;
         let term = pane.terminal.term.lock();
@@ -990,9 +995,9 @@ impl TerminalWindow {
     }
 
     fn scrollbar_for(&self, id: PaneId) -> Option<ScrollbarLayout> {
-        let (_, rect) = self.pane_hits.iter().find(|(pane, _)| *pane == id)?;
+        let rect = self.pane_rect(id)?;
         let pane = self.panes.root.find_pane(id)?;
-        Some(self.renderer.scrollbar_layout(*rect, &pane.terminal.term.lock()))
+        Some(self.renderer.scrollbar_layout(rect, &pane.terminal.term.lock()))
     }
 
     fn scroll_pane(&self, id: PaneId, delta: i32) {
@@ -1004,14 +1009,12 @@ impl TerminalWindow {
 
     fn handle_scrollbar_press(&mut self) -> bool {
         let (x, y) = self.cursor_pos;
-        let Some(id) = self.pane_hits.iter().find(|(_, rect)| rect.contains(x, y)).map(|(id, _)| *id)
-        else { return false };
+        let Some((id, rect)) = self.pane_at(x, y) else { return false };
         let Some(bar) = self.scrollbar_for(id) else { return false };
         if !bar.bounds.contains(x, y) { return false; }
         // A disabled scrollbar still consumes clicks; it must not select terminal text.
         let Some(part) = bar.hit_test(x, y) else { return true };
-        let lines = self.ws_for_rect(self.pane_hits.iter().find(|(pane, _)| *pane == id).unwrap().1)
-            .num_lines.saturating_sub(1).max(1) as i32;
+        let lines = self.ws_for_rect(rect).num_lines.saturating_sub(1).max(1) as i32;
         let amount = match part {
             ScrollbarPart::Up => 1,
             ScrollbarPart::Down => -1,
@@ -1067,8 +1070,7 @@ impl TerminalWindow {
             Ok(text) => {
                 let mut term = terminal.term.lock();
                 let bracketed = term.mode().contains(TermMode::BRACKETED_PASTE);
-                term.selection = None;
-                term.scroll_display(Scroll::Bottom);
+                clear_selection_and_follow(&mut term);
                 drop(term);
                 terminal.write(clipboard::paste_bytes(&text, bracketed));
                 self.redraw();
@@ -1217,11 +1219,7 @@ impl TerminalWindow {
                 }
             }
             TermEvent::TextAreaSizeRequest(format) => {
-                let ws = self
-                    .pane_hits
-                    .iter()
-                    .find(|(id, _)| *id == pane)
-                    .map(|(_, rect)| self.ws_for_rect(*rect));
+                let ws = self.pane_rect(pane).map(|rect| self.ws_for_rect(rect));
                 if let Some(ws) = ws
                     && let Some(p) = self.panes.root.find_pane(pane) {
                     p.terminal.write(format(ws).into_bytes());
@@ -1304,10 +1302,8 @@ impl TerminalWindow {
                     // カーソル直下のペインへ、なければフォーカス中ペインへ
                     let (x, y) = self.cursor_pos;
                     let target = self
-                        .pane_hits
-                        .iter()
-                        .find(|(_, r)| r.contains(x, y))
-                        .map(|(id, _)| *id)
+                        .pane_at(x, y)
+                        .map(|(id, _)| id)
                         .or_else(|| (!self.panes.is_empty()).then_some(self.panes.focused));
                     if let Some(id) = target
                         && let Some(p) = self.panes.root.find_pane(id) {
