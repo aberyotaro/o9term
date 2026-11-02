@@ -8,6 +8,8 @@ mod ime;
 mod instance;
 mod renderer;
 mod panes;
+#[cfg(test)]
+mod render_snapshot;
 mod term;
 mod terminal_window;
 mod theme;

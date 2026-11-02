@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{self, Term};
@@ -12,7 +13,6 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use crate::font::{self, Face, Glyph};
 use crate::ime::Preedit;
 use crate::panes::{SplitDir, SplitterHit};
-use crate::term::EventProxy;
 use crate::theme::{self, Scheme};
 
 // 無いグリフ (日本語・記号など) は CoreText が別のフォントから探す
@@ -239,7 +239,7 @@ impl Renderer {
         width: u32,
         height: u32,
         rect: Rect,
-        term: &Term<EventProxy>,
+        term: &Term<impl EventListener>,
         active: bool,
         scheme: &Scheme,
     ) {
@@ -269,7 +269,7 @@ impl Renderer {
         }
     }
 
-    pub fn scrollbar_layout(&self, pane: Rect, term: &Term<EventProxy>) -> ScrollbarLayout {
+    pub fn scrollbar_layout(&self, pane: Rect, term: &Term<impl EventListener>) -> ScrollbarLayout {
         let grid = term.grid();
         ScrollbarLayout::compute(pane, self.scale, grid.history_size(), grid.screen_lines(), grid.display_offset())
     }
@@ -339,7 +339,7 @@ impl Renderer {
         width: u32,
         height: u32,
         pane: Rect,
-        term: &Term<EventProxy>,
+        term: &Term<impl EventListener>,
         preedit: &Preedit,
         scheme: &Scheme,
     ) -> Option<Rect> {
@@ -591,7 +591,7 @@ impl Renderer {
         w: i32,
         h: i32,
         clip: Rect,
-        term: &Term<EventProxy>,
+        term: &Term<impl EventListener>,
         active: bool,
         scheme: &Scheme,
     ) {
