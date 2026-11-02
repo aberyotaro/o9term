@@ -16,7 +16,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{ResizeDirection, Window, WindowId};
 
 use crate::{clipboard, config, ime, term, theme, window_shade};
-use crate::renderer::{Canvas, Layout, Rect, Renderer, ScrollbarLayout, ScrollbarPart};
+use crate::renderer::{Canvas, Layout, Rect, Renderer, ScrollbarLayout, ScrollbarPart, SettingsHit};
 use crate::panes::{Pane, PaneNode, Panes, SplitDir, SplitterHit};
 use crate::term::{PaneId, Terminal, UserEvent};
 
@@ -151,7 +151,7 @@ struct SettingsState {
     _context: softbuffer::Context<Rc<Window>>,
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     layout: Layout,
-    row_hits: Vec<Rect>,
+    row_hits: Vec<(SettingsHit, Rect)>,
     cursor: (f64, f64),
     focused: bool,
     shade: window_shade::WindowShade,
@@ -657,11 +657,10 @@ impl TerminalWindow {
                 } else if st.layout.collapse_box.contains(x, y) {
                     st.shade.toggle(&st.window, st.window.scale_factor(), None);
                     st.window.request_redraw();
-                } else if let Some(i) = st.row_hits.iter().position(|r| r.contains(x, y)) {
-                    if i == theme::SCHEMES.len() {
-                        self.toggle_bitmap_text();
-                    } else {
-                        self.apply_scheme(i);
+                } else if let Some(&(hit, _)) = st.row_hits.iter().find(|(_, r)| r.contains(x, y)) {
+                    match hit {
+                        SettingsHit::Scheme(i) => self.apply_scheme(i),
+                        SettingsHit::BitmapText => self.toggle_bitmap_text(),
                     }
                 } else if st.layout.titlebar.contains(x, y) {
                     let _ = st.window.drag_window();

@@ -13,7 +13,7 @@ use alacritty_terminal::vte::ansi::Processor;
 
 use crate::ime::Preedit;
 use crate::panes::{SplitDir, SplitterHit};
-use crate::renderer::{Canvas, Layout, Rect, Renderer};
+use crate::renderer::{Canvas, Layout, Rect, Renderer, SettingsHit};
 use crate::term::GridSize;
 use crate::theme;
 
@@ -97,6 +97,7 @@ fn render_snapshot() {
                 r.draw_chrome(&mut cv, &layout, "設定", true);
                 let hits = r.draw_settings(&mut cv, &layout, scheme_index);
                 assert_eq!(hits.len(), theme::SCHEMES.len() + 1);
+                assert_eq!(hits.last().map(|(hit, _)| *hit), Some(SettingsHit::BitmapText));
                 write(&dir, &format!("settings-{tag}"), &buf, w, h);
             }
         }

@@ -60,6 +60,13 @@ impl Rect {
     }
 }
 
+/// 設定ウィンドウで押せる行。
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SettingsHit {
+    Scheme(usize),
+    BitmapText,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ScrollbarPart {
     Up,
@@ -494,7 +501,7 @@ impl Renderer {
         cv: &mut Canvas,
         layout: &Layout,
         selected: usize,
-    ) -> Vec<Rect> {
+    ) -> Vec<(SettingsHit, Rect)> {
         let c = layout.content;
 
         let ascent = self.title.face.ascent().round() as i32;
@@ -535,7 +542,7 @@ impl Renderer {
                 x += sw_w + gap;
             }
 
-            hits.push(row);
+            hits.push((SettingsHit::Scheme(i), row));
         }
         let row = Rect {
             x: c.x, y: c.y + self.px(32.0) + theme::SCHEMES.len() as i32 * row_h,
@@ -552,7 +559,7 @@ impl Renderer {
             }
         }
         self.draw_title_text(cv, "ビットマップ風の文字", row.x + self.px(22.0), cy + ascent / 2 - self.px(1.0), theme::TITLE_TEXT);
-        hits.push(row);
+        hits.push((SettingsHit::BitmapText, row));
         hits
     }
 
