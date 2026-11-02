@@ -27,7 +27,7 @@ Mac OS 9 (Platinum) 風の見た目を持つ、Rust製ターミナルエミュ�
 | 端末エミュレーション・PTY | [`alacritty_terminal`](https://crates.io/crates/alacritty_terminal) |
 | ウィンドウ・入力 | [`winit`](https://crates.io/crates/winit) |
 | 描画 | [`softbuffer`](https://crates.io/crates/softbuffer)（CPU描画） |
-| フォント | [`fontdue`](https://crates.io/crates/fontdue) + macOS内蔵 Monaco / Geneva |
+| フォント | [`core-text`](https://crates.io/crates/core-text) + macOS内蔵 Monaco / Geneva。無い文字はCoreTextが別のフォントから探す |
 
 ```
 src/
@@ -37,6 +37,7 @@ src/
 ├── panes.rs     … ペイン二分木（分割・移動・削除・レイアウト計算）
 ├── term.rs      … PTYとalacritty_terminalの起動・接続
 ├── renderer.rs  … Platinumクローム + グリッドのCPUレンダラ
+├── font.rs      … CoreTextでグリフを濃さの表にする。ブロック要素はマスいっぱいに描く
 ├── theme.rs     … Platinum配色・ANSIパレット・カラースキーマ定義
 ├── config.rs    … 配色・文字描画設定の保存・読み込み
 ├── clipboard.rs … 選択文字列のコピー・貼り付け

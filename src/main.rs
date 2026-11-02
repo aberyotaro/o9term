@@ -2,6 +2,7 @@
 
 mod clipboard;
 mod config;
+mod font;
 mod ime;
 #[cfg(target_os = "macos")]
 mod instance;

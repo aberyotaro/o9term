@@ -8,17 +8,16 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{self, Term};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
-use fontdue::{Font, FontSettings, Metrics};
 
+use crate::font::{self, Face, Glyph};
 use crate::ime::Preedit;
 use crate::panes::{SplitDir, SplitterHit};
 use crate::term::EventProxy;
 use crate::theme::{self, Scheme};
 
-const MONACO: &str = "/System/Library/Fonts/Monaco.ttf";
-const GENEVA: &str = "/System/Library/Fonts/Geneva.ttf";
-// Monaco/Geneva に無いグリフ (日本語など) のフォールバック
-const HIRAGINO: &str = "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc";
+// 無いグリフ (日本語・記号など) は CoreText が別のフォントから探す
+const MONACO: &str = "Monaco";
+const GENEVA: &str = "Geneva";
 
 const FONT_PT: f32 = 12.0; // 端末本文 (論理px)
 const TITLE_PT: f32 = 12.0; // タイトルバー (論理px)
@@ -170,48 +169,30 @@ impl Layout {
 }
 
 pub struct Renderer {
-    font: Font,
-    title_font: Font,
-    jp_font: Option<Font>,
-    font_px: f32,
-    title_px: f32,
+    face: Face,
+    title_face: Face,
     pub cell_w: usize,
     pub cell_h: usize,
     ascent: i32,
     pub scale: f64,
     /// True のときグリフを二値化し、ビットマップ風の輪郭で描く。
     pub bitmap_text: bool,
-    glyphs: HashMap<char, (Metrics, Vec<u8>)>,
-    title_glyphs: HashMap<char, (Metrics, Vec<u8>)>,
+    glyphs: HashMap<(char, (usize, usize)), Glyph>,
+    title_glyphs: HashMap<char, Glyph>,
 }
 
 impl Renderer {
     pub fn new(scale: f64) -> Self {
-        let load = |path: &str| -> Font {
-            let data = std::fs::read(path).unwrap_or_else(|e| panic!("フォント読込失敗 {path}: {e}"));
-            Font::from_bytes(data, FontSettings::default())
-                .unwrap_or_else(|e| panic!("フォント解析失敗 {path}: {e}"))
-        };
-        let font = load(MONACO);
-        let title_font = load(GENEVA);
-        let jp_font = std::fs::read(HIRAGINO)
-            .ok()
-            .and_then(|data| Font::from_bytes(data, FontSettings::default()).ok());
+        let face = Face::new(MONACO, (FONT_PT as f64 * scale) as f32);
+        let title_face = Face::new(GENEVA, (TITLE_PT as f64 * scale) as f32);
 
-        let font_px = (FONT_PT as f64 * scale) as f32;
-        let title_px = (TITLE_PT as f64 * scale) as f32;
-
-        let line = font.horizontal_line_metrics(font_px).expect("Monacoの行メトリクス取得失敗");
-        let cell_w = (font.metrics('M', font_px).advance_width.round() as usize).max(1);
-        let cell_h = (line.new_line_size.ceil() as usize).max(1);
-        let ascent = line.ascent.round() as i32;
+        let cell_w = (face.rasterize('M').advance.round() as usize).max(1);
+        let cell_h = (face.line_height().ceil() as usize).max(1);
+        let ascent = face.ascent().round() as i32;
 
         Self {
-            font,
-            title_font,
-            jp_font,
-            font_px,
-            title_px,
+            face,
+            title_face,
             cell_w,
             cell_h,
             ascent,
@@ -451,9 +432,7 @@ impl Renderer {
         let title_w = self.measure_title(title);
         let title_x = tb.x + (tb.w - title_w) / 2;
         let baseline = tb.y + tb.h / 2
-            + (self.title_font.horizontal_line_metrics(self.title_px).map(|m| m.ascent).unwrap_or(8.0)
-                / 2.0)
-                .round() as i32
+            + (self.title_face.ascent() / 2.0).round() as i32
             - s(1.0);
         let color = if focused { theme::TITLE_TEXT } else { theme::TITLE_TEXT_INACTIVE };
 
@@ -533,12 +512,7 @@ impl Renderer {
         let c = layout.content;
         let clip = Rect { x: 0, y: 0, w, h };
 
-        let ascent = self
-            .title_font
-            .horizontal_line_metrics(self.title_px)
-            .map(|m| m.ascent)
-            .unwrap_or(8.0)
-            .round() as i32;
+        let ascent = self.title_face.ascent().round() as i32;
 
         self.draw_title_text(buf, w, h, "カラースキーマ:", c.x, c.y + ascent, theme::TITLE_TEXT, clip);
 
@@ -717,29 +691,20 @@ impl Renderer {
         color: u32,
         clip: &Rect,
     ) {
-        let px = self.font_px;
-        let font = if self.font.lookup_glyph_index(c) != 0 {
-            &self.font
-        } else {
-            self.jp_font.as_ref().unwrap_or(&self.font)
-        };
-        let (metrics, bitmap) = self.glyphs.entry(c).or_insert_with(|| font.rasterize(c, px));
-        let gx = cell_x + metrics.xmin;
-        let gy = cell_y + self.ascent - metrics.ymin - metrics.height as i32;
-        blend_glyph(buf, w, h, gx, gy, metrics, bitmap, color, clip, self.bitmap_text);
+        let (cw, ch, ascent) = (self.cell_w, self.cell_h, self.ascent);
+        let phase = font::pattern_phase(c, cell_x, cell_y);
+        let glyph = self.glyphs.entry((c, phase)).or_insert_with(|| {
+            font::block_element(c, cw, ch, ascent, phase).unwrap_or_else(|| self.face.rasterize(c))
+        });
+        let gx = cell_x + glyph.left;
+        let gy = cell_y + self.ascent - glyph.bottom - glyph.height as i32;
+        blend_glyph(buf, w, h, gx, gy, glyph, color, clip, self.bitmap_text);
     }
 
     fn measure_title(&mut self, text: &str) -> i32 {
-        let px = self.title_px;
         let mut total = 0.0f32;
         for c in text.chars() {
-            let font = if self.title_font.lookup_glyph_index(c) != 0 {
-                &self.title_font
-            } else {
-                self.jp_font.as_ref().unwrap_or(&self.title_font)
-            };
-            let (m, _) = self.title_glyphs.entry(c).or_insert_with(|| font.rasterize(c, px));
-            total += m.advance_width;
+            total += self.title_glyphs.entry(c).or_insert_with(|| self.title_face.rasterize(c)).advance;
         }
         total.round() as i32
     }
@@ -755,20 +720,13 @@ impl Renderer {
         color: u32,
         clip: Rect,
     ) {
-        let px = self.title_px;
         let mut pen = x as f32;
         for c in text.chars() {
-            let font = if self.title_font.lookup_glyph_index(c) != 0 {
-                &self.title_font
-            } else {
-                self.jp_font.as_ref().unwrap_or(&self.title_font)
-            };
-            let (metrics, bitmap) =
-                self.title_glyphs.entry(c).or_insert_with(|| font.rasterize(c, px));
-            let gx = pen.round() as i32 + metrics.xmin;
-            let gy = baseline - metrics.ymin - metrics.height as i32;
-            blend_glyph(buf, w, h, gx, gy, metrics, bitmap, color, &clip, self.bitmap_text);
-            pen += metrics.advance_width;
+            let glyph = self.title_glyphs.entry(c).or_insert_with(|| self.title_face.rasterize(c));
+            let gx = pen.round() as i32 + glyph.left;
+            let gy = baseline - glyph.bottom - glyph.height as i32;
+            blend_glyph(buf, w, h, gx, gy, glyph, color, &clip, self.bitmap_text);
+            pen += glyph.advance;
         }
     }
 }
@@ -893,24 +851,23 @@ fn blend_glyph(
     bh: i32,
     gx: i32,
     gy: i32,
-    metrics: &Metrics,
-    bitmap: &[u8],
+    glyph: &Glyph,
     color: u32,
     clip: &Rect,
     bitmap_text: bool,
 ) {
     let (fr, fg_, fb) = ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
-    for row in 0..metrics.height as i32 {
+    for row in 0..glyph.height as i32 {
         let py = gy + row;
         if py < clip.y || py >= clip.bottom() || py < 0 || py >= bh {
             continue;
         }
-        for col in 0..metrics.width as i32 {
+        for col in 0..glyph.width as i32 {
             let px = gx + col;
             if px < clip.x || px >= clip.right() || px < 0 || px >= bw {
                 continue;
             }
-            let coverage = bitmap[(row * metrics.width as i32 + col) as usize] as u32;
+            let coverage = glyph.coverage[(row * glyph.width as i32 + col) as usize] as u32;
             let a = if bitmap_text { if coverage >= 128 { 255 } else { 0 } } else { coverage };
             if a == 0 {
                 continue;
@@ -991,10 +948,10 @@ mod tests {
     fn bitmap_text_uses_only_foreground_and_background_pixels() {
         let mut crisp = [0x0000FF; 3];
         let mut smooth = crisp;
-        let metrics = Metrics { width: 3, height: 1, ..Metrics::default() };
+        let glyph = Glyph { width: 3, height: 1, coverage: vec![127, 128, 255], ..Glyph::default() };
         let clip = Rect { x: 0, y: 0, w: 3, h: 1 };
-        blend_glyph(&mut crisp, 3, 1, 0, 0, &metrics, &[127, 128, 255], 0x00FF00, &clip, true);
-        blend_glyph(&mut smooth, 3, 1, 0, 0, &metrics, &[127, 128, 255], 0x00FF00, &clip, false);
+        blend_glyph(&mut crisp, 3, 1, 0, 0, &glyph, 0x00FF00, &clip, true);
+        blend_glyph(&mut smooth, 3, 1, 0, 0, &glyph, 0x00FF00, &clip, false);
         assert_eq!(crisp, [0x0000FF, 0x00FF00, 0x00FF00]);
         assert_ne!(smooth[0], crisp[0]);
         assert_ne!(smooth[1], crisp[1]);
