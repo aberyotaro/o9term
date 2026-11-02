@@ -8,10 +8,15 @@ fn config_path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".config/os9terminal/config.toml"))
 }
 
+/// `key = ...` 形式の行なら、`=` より後ろをそのまま返す。
+fn line_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let (name, value) = line.split_once('=')?;
+    (name.trim() == key).then_some(value)
+}
+
 fn value<'a>(content: &'a str, key: &str) -> Option<&'a str> {
     content.lines().find_map(|line| {
-        let (name, value) = line.split_once('=')?;
-        (name.trim() == key).then(|| value.split('#').next().unwrap_or("").trim())
+        line_value(line, key).map(|value| value.split('#').next().unwrap_or("").trim())
     })
 }
 
@@ -20,7 +25,7 @@ fn update(content: &str, key: &str, value: &str) -> String {
     let mut found = false;
     let mut lines = Vec::new();
     for line in content.lines() {
-        if line.split_once('=').is_some_and(|(name, _)| name.trim() == key) {
+        if line_value(line, key).is_some() {
             if !found {
                 lines.push(format!("{key} = {value}"));
                 found = true;
@@ -89,5 +94,24 @@ mod tests {
         let result = update(content, "scheme", "\"classic\"");
         assert!(result.contains("scheme_backup = \"dark\""));
         assert_eq!(value(&result, "scheme"), Some("\"classic\""));
+    }
+
+    #[test]
+    fn update_replaces_in_place_collapses_duplicates_and_appends_when_missing() {
+        let content = "a = 1\nscheme = \"dark\"\n# scheme = x\nb = 2\nscheme=\"old\"";
+        assert_eq!(
+            update(content, "scheme", "\"new\""),
+            "a = 1\nscheme = \"new\"\n# scheme = x\nb = 2\n",
+        );
+        assert_eq!(update("a = 1", "b", "2"), "a = 1\nb = 2\n");
+        assert_eq!(update("", "b", "2"), "b = 2\n");
+    }
+
+    #[test]
+    fn value_uses_the_first_match_and_splits_at_the_first_equals_sign() {
+        assert_eq!(value("k = 1\nk = 2\n", "k"), Some("1"));
+        assert_eq!(value("k = a = b # c\n", "k"), Some("a = b"));
+        assert_eq!(value("k =\n", "k"), Some(""));
+        assert_eq!(value("k\n", "k"), None);
     }
 }
