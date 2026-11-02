@@ -31,6 +31,10 @@ pub struct Rect {
 }
 
 impl Rect {
+    pub fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
+        Self { x, y, w, h }
+    }
+
     pub fn contains(&self, px: f64, py: f64) -> bool {
         px >= self.x as f64
             && px < (self.x + self.w) as f64
@@ -207,27 +211,25 @@ impl Renderer {
     /// ペインとスプリッターは呼び出し側がこの後に個別に描く。
     pub fn draw_chrome(
         &mut self,
-        buf: &mut [u32],
-        width: u32,
-        height: u32,
+        cv: &mut Canvas,
         layout: &Layout,
         title: &str,
         focused: bool,
     ) {
-        let (w, h) = (width as i32, height as i32);
         let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
+        let (w, h) = (cv.w, cv.h);
 
-        buf.fill(theme::FRAME);
+        cv.fill(cv.bounds(), theme::FRAME);
         // 外周の輪郭線
-        stroke_rect(buf, w, h, 0, 0, w, h, s(1.0), theme::OUTLINE);
+        cv.stroke(cv.bounds(), s(1.0), theme::OUTLINE);
         // 外側ベベル (左上ハイライト・右下シャドウ)
         let e = s(1.0);
-        fill_rect(buf, w, h, e, e, w - 2 * e, e, theme::BEVEL_LIGHT);
-        fill_rect(buf, w, h, e, e, e, h - 2 * e, theme::BEVEL_LIGHT);
-        fill_rect(buf, w, h, e, h - 2 * e, w - 2 * e, e, theme::BEVEL_DARK);
-        fill_rect(buf, w, h, w - 2 * e, e, e, h - 2 * e, theme::BEVEL_DARK);
+        cv.fill(Rect::new(e, e, w - 2 * e, e), theme::BEVEL_LIGHT);
+        cv.fill(Rect::new(e, e, e, h - 2 * e), theme::BEVEL_LIGHT);
+        cv.fill(Rect::new(e, h - 2 * e, w - 2 * e, e), theme::BEVEL_DARK);
+        cv.fill(Rect::new(w - 2 * e, e, e, h - 2 * e), theme::BEVEL_DARK);
 
-        self.draw_titlebar(buf, w, h, layout, title, focused);
+        self.draw_titlebar(cv, layout, title, focused);
     }
 
     /// ペイン1枚 (窪んだベベル + 白地 + 端末グリッド) を描画する。
@@ -235,26 +237,23 @@ impl Renderer {
     /// 両方にフォーカスがあるときのみ true。
     pub fn draw_pane(
         &mut self,
-        buf: &mut [u32],
-        width: u32,
-        height: u32,
+        cv: &mut Canvas,
         rect: Rect,
         term: &Term<impl EventListener>,
         active: bool,
         scheme: &Scheme,
     ) {
-        let (w, h) = (width as i32, height as i32);
         let e = ((self.scale).round() as i32).max(1);
 
         // 窪みベベル: 左上が影、右下がハイライト
-        fill_rect(buf, w, h, rect.x, rect.y, rect.w, e, theme::SUNKEN_DARK);
-        fill_rect(buf, w, h, rect.x, rect.y, e, rect.h, theme::SUNKEN_DARK);
-        fill_rect(buf, w, h, rect.x, rect.bottom() - e, rect.w, e, theme::SUNKEN_LIGHT);
-        fill_rect(buf, w, h, rect.right() - e, rect.y, e, rect.h, theme::SUNKEN_LIGHT);
-        fill_rect(buf, w, h, rect.x + e, rect.y + e, rect.w - 2 * e, rect.h - 2 * e, scheme.bg);
+        cv.fill(Rect::new(rect.x, rect.y, rect.w, e), theme::SUNKEN_DARK);
+        cv.fill(Rect::new(rect.x, rect.y, e, rect.h), theme::SUNKEN_DARK);
+        cv.fill(Rect::new(rect.x, rect.bottom() - e, rect.w, e), theme::SUNKEN_LIGHT);
+        cv.fill(Rect::new(rect.right() - e, rect.y, e, rect.h), theme::SUNKEN_LIGHT);
+        cv.fill(Rect::new(rect.x + e, rect.y + e, rect.w - 2 * e, rect.h - 2 * e), scheme.bg);
 
-        self.draw_grid(buf, w, h, self.grid_rect(rect), term, active, scheme);
-        self.draw_scrollbar(buf, width, height, &self.scrollbar_layout(rect, term));
+        self.draw_grid(cv, self.grid_rect(rect), term, active, scheme);
+        self.draw_scrollbar(cv, &self.scrollbar_layout(rect, term));
     }
 
     /// ペイン矩形から実際に文字グリッドを置く領域 (ベベル+余白の内側) を求める。
@@ -274,70 +273,59 @@ impl Renderer {
         ScrollbarLayout::compute(pane, self.scale, grid.history_size(), grid.screen_lines(), grid.display_offset())
     }
 
-    fn draw_scrollbar(&self, buf: &mut [u32], width: u32, height: u32, bar: &ScrollbarLayout) {
-        let (w, h) = (width as i32, height as i32);
+    fn draw_scrollbar(&self, cv: &mut Canvas, bar: &ScrollbarLayout) {
         let s = |v: f64| ((v * self.scale).round() as i32).max(1);
         let e = s(1.0);
         let track = bar.track;
-        fill_rect(buf, w, h, track.x, track.y, track.w, track.h, theme::FRAME);
+        cv.fill(track, theme::FRAME);
         // グレーの網掛けトラック。
         for y in (track.y..track.bottom()).step_by(e as usize) {
             for x in (track.x..track.right()).step_by(e as usize) {
                 if ((x - track.x) / e + (y - track.y) / e) % 2 == 0 {
-                    fill_rect_clipped(buf, w, h, x, y, e, e, theme::STRIPE_LIGHT, &track);
+                    cv.fill_clipped(Rect::new(x, y, e, e), theme::STRIPE_LIGHT, track);
                 }
             }
         }
-        stroke_rect(buf, w, h, track.x, track.y, track.w, track.h, e, theme::BEVEL_DARK);
-        let button = |buf: &mut [u32], r: Rect| {
+        cv.stroke(track, e, theme::BEVEL_DARK);
+        let button = |cv: &mut Canvas, r: Rect| {
             if r.w <= 0 || r.h <= 0 { return; }
-            fill_rect(buf, w, h, r.x, r.y, r.w, r.h, theme::BOX_FILL);
-            stroke_rect(buf, w, h, r.x, r.y, r.w, r.h, e, theme::BOX_BORDER);
-            fill_rect(buf, w, h, r.x + e, r.y + e, r.w - 2 * e, e, theme::BEVEL_LIGHT);
-            fill_rect(buf, w, h, r.x + e, r.y + e, e, r.h - 2 * e, theme::BEVEL_LIGHT);
-            fill_rect(buf, w, h, r.x + e, r.bottom() - 2 * e, r.w - 2 * e, e, theme::BEVEL_DARK);
-            fill_rect(buf, w, h, r.right() - 2 * e, r.y + e, e, r.h - 2 * e, theme::BEVEL_DARK);
+            cv.fill(r, theme::BOX_FILL);
+            cv.stroke(r, e, theme::BOX_BORDER);
+            cv.fill(Rect::new(r.x + e, r.y + e, r.w - 2 * e, e), theme::BEVEL_LIGHT);
+            cv.fill(Rect::new(r.x + e, r.y + e, e, r.h - 2 * e), theme::BEVEL_LIGHT);
+            cv.fill(Rect::new(r.x + e, r.bottom() - 2 * e, r.w - 2 * e, e), theme::BEVEL_DARK);
+            cv.fill(Rect::new(r.right() - 2 * e, r.y + e, e, r.h - 2 * e), theme::BEVEL_DARK);
         };
-        button(buf, bar.up);
-        button(buf, bar.down);
+        button(cv, bar.up);
+        button(cv, bar.down);
         let color = if bar.history_size > 0 { theme::BOX_BORDER } else { theme::BEVEL_DARK };
         for (r, up) in [(bar.up, true), (bar.down, false)] {
             let (cx, cy) = r.center();
             for i in 0..4 {
                 let y = if up { cy - s(2.0) + i * e } else { cy + s(1.0) - i * e };
-                fill_rect_clipped(buf, w, h, cx - i * e, y, (2 * i + 1) * e, e, color, &r);
+                cv.fill_clipped(Rect::new(cx - i * e, y, (2 * i + 1) * e, e), color, r);
             }
         }
         if bar.history_size > 0 {
-            button(buf, bar.thumb);
+            button(cv, bar.thumb);
             let (cx, cy) = bar.thumb.center();
             for i in -1..=1 {
-                fill_rect_clipped(buf, w, h, cx - s(4.0), cy + i * s(3.0), s(8.0), e, theme::BEVEL_DARK, &bar.thumb);
-                fill_rect_clipped(buf, w, h, cx - s(4.0), cy + i * s(3.0) + e, s(8.0), e, theme::BEVEL_LIGHT, &bar.thumb);
+                cv.fill_clipped(Rect::new(cx - s(4.0), cy + i * s(3.0), s(8.0), e), theme::BEVEL_DARK, bar.thumb);
+                cv.fill_clipped(Rect::new(cx - s(4.0), cy + i * s(3.0) + e, s(8.0), e), theme::BEVEL_LIGHT, bar.thumb);
             }
         }
     }
 
     /// ベルの鳴ったペインだけを短時間反転する。終了時は通常の再描画で戻す。
-    pub fn draw_visual_bell(&self, buf: &mut [u32], width: u32, height: u32, rect: Rect) {
-        let x0 = rect.x.clamp(0, width as i32);
-        let x1 = rect.right().clamp(0, width as i32);
-        let y0 = rect.y.clamp(0, height as i32);
-        let y1 = rect.bottom().clamp(0, height as i32);
-        for y in y0..y1 {
-            for x in x0..x1 {
-                buf[(y as u32 * width + x as u32) as usize] ^= 0x00FF_FFFF;
-            }
-        }
+    pub fn draw_visual_bell(&self, cv: &mut Canvas, rect: Rect) {
+        cv.invert(rect);
     }
 
     /// 未確定文字を PTY の内容に重ね、選択中の文節とキャレットを示す。
     /// 戻り値はネイティブ IME 候補ウィンドウを置く範囲 (物理 px)。
     pub fn draw_preedit(
         &mut self,
-        buf: &mut [u32],
-        width: u32,
-        height: u32,
+        cv: &mut Canvas,
         pane: Rect,
         term: &Term<impl EventListener>,
         preedit: &Preedit,
@@ -353,60 +341,58 @@ impl Renderer {
         let cursor = term::point_to_viewport(content.display_offset, content.cursor.point)?;
         if cursor.line >= rows { return None; }
         let composition = preedit.layout(columns, cursor.column.0.min(columns - 1));
-        let (w, h) = (width as i32, height as i32);
         let y = grid.y + cursor.line as i32 * ch;
         let x = grid.x + composition.start_column as i32 * cw;
         let width = composition.width as i32 * cw;
         let edge = (self.scale.round() as i32).max(1);
-        fill_rect_clipped(buf, w, h, x, y, width, ch, scheme.bg, &grid);
-        fill_rect_clipped(buf, w, h, x, y + ch - edge, width, edge, scheme.fg, &grid);
+        cv.fill_clipped(Rect::new(x, y, width, ch), scheme.bg, grid);
+        cv.fill_clipped(Rect::new(x, y + ch - edge, width, edge), scheme.fg, grid);
         if let Some((start, end)) = composition.selection {
             let x = grid.x + start as i32 * cw;
             let width = (end - start) as i32 * cw;
-            fill_rect_clipped(buf, w, h, x, y, width, ch, scheme.fg, &grid);
-            fill_rect_clipped(buf, w, h, x, y + ch - edge, width, edge, scheme.bg, &grid);
+            cv.fill_clipped(Rect::new(x, y, width, ch), scheme.fg, grid);
+            cv.fill_clipped(Rect::new(x, y + ch - edge, width, edge), scheme.bg, grid);
         }
         for glyph in &composition.glyphs {
             let selected = composition.selection.is_some_and(|(start, end)| glyph.column >= start && glyph.column < end);
             let color = if selected { scheme.bg } else { scheme.fg };
-            self.draw_cell_glyph(buf, w, h, glyph.character, grid.x + glyph.column as i32 * cw, y, color, &grid);
+            self.draw_cell_glyph(cv, glyph.character, grid.x + glyph.column as i32 * cw, y, color, grid);
         }
         if let Some(column) = composition.cursor_column {
             let selected = composition.selection.is_some_and(|(start, end)| column >= start && column < end);
             let color = if selected { scheme.bg } else { scheme.cursor };
-            fill_rect_clipped(buf, w, h, grid.x + column as i32 * cw, y, edge, ch, color, &grid);
+            cv.fill_clipped(Rect::new(grid.x + column as i32 * cw, y, edge, ch), color, grid);
         }
         Some(Rect { x: grid.x + composition.candidate_column as i32 * cw, y, w: composition.candidate_width as i32 * cw, h: ch })
     }
 
     /// ペイン間のスプリッターバー。タイトルバーと同じリブ (縞) の意匠。
-    pub fn draw_splitter(&self, buf: &mut [u32], width: u32, height: u32, sh: &SplitterHit) {
-        let (w, h) = (width as i32, height as i32);
+    pub fn draw_splitter(&self, cv: &mut Canvas, sh: &SplitterHit) {
         let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
         let e = s(1.0);
         let r = sh.rect;
 
-        fill_rect(buf, w, h, r.x, r.y, r.w, r.h, theme::FRAME);
+        cv.fill(r, theme::FRAME);
         let (cx, cy) = r.center();
         match sh.dir {
             SplitDir::Vertical => {
                 // 縦バー: 左にハイライト、右に影
-                fill_rect(buf, w, h, r.x, r.y, e, r.h, theme::BEVEL_LIGHT);
-                fill_rect(buf, w, h, r.right() - e, r.y, e, r.h, theme::BEVEL_DARK);
+                cv.fill(Rect::new(r.x, r.y, e, r.h), theme::BEVEL_LIGHT);
+                cv.fill(Rect::new(r.right() - e, r.y, e, r.h), theme::BEVEL_DARK);
                 // 中央のリブ3本 (横線)
                 for i in -1..=1 {
                     let y = cy + i * s(4.0);
-                    fill_rect(buf, w, h, r.x + s(2.0), y, r.w - s(4.0), e, theme::STRIPE);
-                    fill_rect(buf, w, h, r.x + s(2.0), y + e, r.w - s(4.0), e, theme::STRIPE_LIGHT);
+                    cv.fill(Rect::new(r.x + s(2.0), y, r.w - s(4.0), e), theme::STRIPE);
+                    cv.fill(Rect::new(r.x + s(2.0), y + e, r.w - s(4.0), e), theme::STRIPE_LIGHT);
                 }
             }
             SplitDir::Horizontal => {
-                fill_rect(buf, w, h, r.x, r.y, r.w, e, theme::BEVEL_LIGHT);
-                fill_rect(buf, w, h, r.x, r.bottom() - e, r.w, e, theme::BEVEL_DARK);
+                cv.fill(Rect::new(r.x, r.y, r.w, e), theme::BEVEL_LIGHT);
+                cv.fill(Rect::new(r.x, r.bottom() - e, r.w, e), theme::BEVEL_DARK);
                 for i in -1..=1 {
                     let x = cx + i * s(4.0);
-                    fill_rect(buf, w, h, x, r.y + s(2.0), e, r.h - s(4.0), theme::STRIPE);
-                    fill_rect(buf, w, h, x + e, r.y + s(2.0), e, r.h - s(4.0), theme::STRIPE_LIGHT);
+                    cv.fill(Rect::new(x, r.y + s(2.0), e, r.h - s(4.0)), theme::STRIPE);
+                    cv.fill(Rect::new(x + e, r.y + s(2.0), e, r.h - s(4.0)), theme::STRIPE_LIGHT);
                 }
             }
         }
@@ -414,9 +400,7 @@ impl Renderer {
 
     fn draw_titlebar(
         &mut self,
-        buf: &mut [u32],
-        w: i32,
-        h: i32,
+        cv: &mut Canvas,
         layout: &Layout,
         title: &str,
         focused: bool,
@@ -426,7 +410,7 @@ impl Renderer {
         let tb = layout.titlebar;
 
         // タイトルバー下端の区切り線
-        fill_rect(buf, w, h, tb.x, tb.bottom(), tb.w, s(1.0), theme::SEPARATOR);
+        cv.fill(Rect::new(tb.x, tb.bottom(), tb.w, s(1.0)), theme::SEPARATOR);
 
         // タイトル文字列 (中央揃え)
         let title_w = self.measure_title(title);
@@ -449,70 +433,66 @@ impl Renderer {
             while y + s(1.0) < tb.bottom() - s(3.0) {
                 for &(x0, x1) in &segs {
                     if x1 > x0 {
-                        fill_rect(buf, w, h, x0, y, x1 - x0, s(1.0), theme::STRIPE);
-                        fill_rect(buf, w, h, x0, y + s(1.0), x1 - x0, s(1.0), theme::STRIPE_LIGHT);
+                        cv.fill(Rect::new(x0, y, x1 - x0, s(1.0)), theme::STRIPE);
+                        cv.fill(Rect::new(x0, y + s(1.0), x1 - x0, s(1.0)), theme::STRIPE_LIGHT);
                     }
                 }
                 y += s(2.0);
             }
 
-            self.draw_control_box(buf, w, h, layout.close_box, BoxKind::Close);
-            self.draw_control_box(buf, w, h, layout.zoom_box, BoxKind::Zoom);
-            self.draw_control_box(buf, w, h, layout.collapse_box, BoxKind::Collapse);
+            self.draw_control_box(cv, layout.close_box, BoxKind::Close);
+            self.draw_control_box(cv, layout.zoom_box, BoxKind::Zoom);
+            self.draw_control_box(cv, layout.collapse_box, BoxKind::Collapse);
         }
 
-        self.draw_title_text(buf, w, h, title, title_x, baseline, color);
+        self.draw_title_text(cv, title, title_x, baseline, color);
     }
 
-    fn draw_control_box(&self, buf: &mut [u32], w: i32, h: i32, r: Rect, kind: BoxKind) {
+    fn draw_control_box(&self, cv: &mut Canvas, r: Rect, kind: BoxKind) {
         let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
         let e = s(1.0);
-        fill_rect(buf, w, h, r.x, r.y, r.w, r.h, theme::BOX_FILL);
-        stroke_rect(buf, w, h, r.x, r.y, r.w, r.h, e, theme::BOX_BORDER);
+        cv.fill(r, theme::BOX_FILL);
+        cv.stroke(r, e, theme::BOX_BORDER);
         // 立体感: 内側の左上に影、右下にハイライト (押し込める見た目)
-        fill_rect(buf, w, h, r.x + e, r.y + e, r.w - 2 * e, e, theme::BEVEL_DARK);
-        fill_rect(buf, w, h, r.x + e, r.y + e, e, r.h - 2 * e, theme::BEVEL_DARK);
-        fill_rect(buf, w, h, r.x + e, r.bottom() - 2 * e, r.w - 2 * e, e, theme::BEVEL_LIGHT);
-        fill_rect(buf, w, h, r.right() - 2 * e, r.y + e, e, r.h - 2 * e, theme::BEVEL_LIGHT);
+        cv.fill(Rect::new(r.x + e, r.y + e, r.w - 2 * e, e), theme::BEVEL_DARK);
+        cv.fill(Rect::new(r.x + e, r.y + e, e, r.h - 2 * e), theme::BEVEL_DARK);
+        cv.fill(Rect::new(r.x + e, r.bottom() - 2 * e, r.w - 2 * e, e), theme::BEVEL_LIGHT);
+        cv.fill(Rect::new(r.right() - 2 * e, r.y + e, e, r.h - 2 * e), theme::BEVEL_LIGHT);
 
         match kind {
             BoxKind::Close => {}
             BoxKind::Zoom => {
                 // 左上寄りの小さい四角
-                stroke_rect(buf, w, h, r.x + 2 * e, r.y + 2 * e, r.w * 2 / 3, r.h * 2 / 3, e, theme::BOX_BORDER);
+                cv.stroke(Rect::new(r.x + 2 * e, r.y + 2 * e, r.w * 2 / 3, r.h * 2 / 3), e, theme::BOX_BORDER);
             }
             BoxKind::Collapse => {
                 // 中央の横線 (ウィンドウシェード)
-                fill_rect(buf, w, h, r.x + 2 * e, r.y + r.h / 2, r.w - 4 * e, e, theme::BOX_BORDER);
+                cv.fill(Rect::new(r.x + 2 * e, r.y + r.h / 2, r.w - 4 * e, e), theme::BOX_BORDER);
             }
         }
     }
 
     /// ペインドラッグ中のドロップ先プレビュー枠。
-    pub fn draw_drop_outline(&self, buf: &mut [u32], width: u32, height: u32, r: Rect) {
-        let (w, h) = (width as i32, height as i32);
+    pub fn draw_drop_outline(&self, cv: &mut Canvas, r: Rect) {
         let t = ((2.0 * self.scale).round() as i32).max(2);
-        stroke_rect(buf, w, h, r.x, r.y, r.w, r.h, t, theme::DROP_HINT);
+        cv.stroke(r, t, theme::DROP_HINT);
     }
 
     /// 設定ウィンドウの中身 (カラースキーマのラジオボタン一覧) を描画し、
     /// 各行のヒットテスト用矩形を返す。クロームは draw_chrome で描いておくこと。
     pub fn draw_settings(
         &mut self,
-        buf: &mut [u32],
-        width: u32,
-        height: u32,
+        cv: &mut Canvas,
         layout: &Layout,
         selected: usize,
     ) -> Vec<Rect> {
-        let (w, h) = (width as i32, height as i32);
         let scale = self.scale;
         let s = move |v: f32| ((v as f64 * scale).round() as i32).max(1);
         let c = layout.content;
 
         let ascent = self.title_face.ascent().round() as i32;
 
-        self.draw_title_text(buf, w, h, "カラースキーマ:", c.x, c.y + ascent, theme::TITLE_TEXT);
+        self.draw_title_text(cv, "カラースキーマ:", c.x, c.y + ascent, theme::TITLE_TEXT);
 
         let row_h = s(24.0);
         let mut hits = Vec::with_capacity(theme::SCHEMES.len());
@@ -522,16 +502,14 @@ impl Renderer {
 
             // ラジオボタン
             let r_out = s(6.0);
-            fill_circle(buf, w, h, row.x + s(8.0), cy, r_out, theme::BOX_BORDER);
-            fill_circle(buf, w, h, row.x + s(8.0), cy, r_out - s(1.0), 0xFFFFFF);
+            cv.circle(row.x + s(8.0), cy, r_out, theme::BOX_BORDER);
+            cv.circle(row.x + s(8.0), cy, r_out - s(1.0), 0xFFFFFF);
             if i == selected {
-                fill_circle(buf, w, h, row.x + s(8.0), cy, s(3.0), 0x000000);
+                cv.circle(row.x + s(8.0), cy, s(3.0), 0x000000);
             }
 
             self.draw_title_text(
-                buf,
-                w,
-                h,
+                cv,
                 scheme.name,
                 row.x + s(22.0),
                 cy + ascent / 2 - s(1.0),
@@ -545,8 +523,8 @@ impl Renderer {
             let samples = [scheme.bg, scheme.fg, scheme.ansi[1], scheme.ansi[2], scheme.ansi[4]];
             let mut x = row.right() - s(4.0) - (sw_w + gap) * samples.len() as i32;
             for color in samples {
-                fill_rect(buf, w, h, x, cy - sw_h / 2, sw_w, sw_h, color);
-                stroke_rect(buf, w, h, x, cy - sw_h / 2, sw_w, sw_h, s(1.0), theme::BOX_BORDER);
+                cv.fill(Rect::new(x, cy - sw_h / 2, sw_w, sw_h), color);
+                cv.stroke(Rect::new(x, cy - sw_h / 2, sw_w, sw_h), s(1.0), theme::BOX_BORDER);
                 x += sw_w + gap;
             }
 
@@ -558,35 +536,32 @@ impl Renderer {
         };
         let cy = row.y + row.h / 2;
         let checkbox = Rect { x: row.x + s(2.0), y: cy - s(6.0), w: s(12.0), h: s(12.0) };
-        fill_rect(buf, w, h, checkbox.x, checkbox.y, checkbox.w, checkbox.h, theme::BEVEL_LIGHT);
-        stroke_rect(buf, w, h, checkbox.x, checkbox.y, checkbox.w, checkbox.h, s(1.0), theme::BOX_BORDER);
+        cv.fill(checkbox, theme::BEVEL_LIGHT);
+        cv.stroke(checkbox, s(1.0), theme::BOX_BORDER);
         if self.bitmap_text {
             // ピクセルで描くチェックマーク。
             for (dx, dy) in [(2.0, 5.0), (3.0, 6.0), (4.0, 7.0), (5.0, 6.0), (6.0, 5.0), (7.0, 4.0), (8.0, 3.0)] {
-                fill_rect(buf, w, h, checkbox.x + s(dx), checkbox.y + s(dy), s(1.0), s(2.0), theme::BOX_BORDER);
+                cv.fill(Rect::new(checkbox.x + s(dx), checkbox.y + s(dy), s(1.0), s(2.0)), theme::BOX_BORDER);
             }
         }
-        self.draw_title_text(buf, w, h, "ビットマップ風の文字", row.x + s(22.0), cy + ascent / 2 - s(1.0), theme::TITLE_TEXT);
+        self.draw_title_text(cv, "ビットマップ風の文字", row.x + s(22.0), cy + ascent / 2 - s(1.0), theme::TITLE_TEXT);
         hits.push(row);
         hits
     }
 
-    pub fn draw_grow_box(&self, buf: &mut [u32], width: u32, height: u32, r: Rect) {
-        let (w, h) = (width as i32, height as i32);
+    pub fn draw_grow_box(&self, cv: &mut Canvas, r: Rect) {
         let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
         let e = s(1.0);
-        fill_rect(buf, w, h, r.x, r.y, r.w, r.h, theme::BOX_FILL);
-        stroke_rect(buf, w, h, r.x, r.y, r.w, r.h, e, theme::BOX_BORDER);
+        cv.fill(r, theme::BOX_FILL);
+        cv.stroke(r, e, theme::BOX_BORDER);
         // 重なった2つの四角のアイコン
-        stroke_rect(buf, w, h, r.x + 3 * e, r.y + 3 * e, r.w / 2, r.h / 2, e, theme::BOX_BORDER);
-        stroke_rect(buf, w, h, r.x + r.w / 3, r.y + r.h / 3, r.w / 2, r.h / 2, e, theme::BOX_BORDER);
+        cv.stroke(Rect::new(r.x + 3 * e, r.y + 3 * e, r.w / 2, r.h / 2), e, theme::BOX_BORDER);
+        cv.stroke(Rect::new(r.x + r.w / 3, r.y + r.h / 3, r.w / 2, r.h / 2), e, theme::BOX_BORDER);
     }
 
     fn draw_grid(
         &mut self,
-        buf: &mut [u32],
-        w: i32,
-        h: i32,
+        cv: &mut Canvas,
         clip: Rect,
         term: &Term<impl EventListener>,
         active: bool,
@@ -631,13 +606,13 @@ impl Renderer {
             let y = clip.y + row * ch;
             if bg != scheme.bg {
                 let bw = if cell.flags.contains(Flags::WIDE_CHAR) { cw * 2 } else { cw };
-                fill_rect_clipped(buf, w, h, x, y, bw, ch, bg, &clip);
+                cv.fill_clipped(Rect::new(x, y, bw, ch), bg, clip);
             }
             if cell.c != ' ' {
-                self.draw_cell_glyph(buf, w, h, cell.c, x, y, fg, &clip);
+                self.draw_cell_glyph(cv, cell.c, x, y, fg, clip);
             }
             if cell.flags.contains(Flags::UNDERLINE) {
-                fill_rect_clipped(buf, w, h, x, y + self.ascent + 1, cw, 1, fg, &clip);
+                cv.fill_clipped(Rect::new(x, y + self.ascent + 1, cw, 1), fg, clip);
             }
         }
 
@@ -656,22 +631,22 @@ impl Renderer {
         let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
 
         if !active {
-            stroke_rect(buf, w, h, x, y, cw, ch, s(1.0), cursor_color);
+            cv.stroke(Rect::new(x, y, cw, ch), s(1.0), cursor_color);
             return;
         }
         match cursor.shape {
             CursorShape::Beam => {
-                fill_rect_clipped(buf, w, h, x, y, s(2.0), ch, cursor_color, &clip);
+                cv.fill_clipped(Rect::new(x, y, s(2.0), ch), cursor_color, clip);
             }
             CursorShape::Underline => {
-                fill_rect_clipped(buf, w, h, x, y + ch - s(2.0), cw, s(2.0), cursor_color, &clip);
+                cv.fill_clipped(Rect::new(x, y + ch - s(2.0), cw, s(2.0)), cursor_color, clip);
             }
             _ => {
                 // ブロックカーソル: セルを反転
-                fill_rect_clipped(buf, w, h, x, y, cw, ch, cursor_color, &clip);
+                cv.fill_clipped(Rect::new(x, y, cw, ch), cursor_color, clip);
                 let c = term.grid()[cursor.point].c;
                 if c != ' ' {
-                    self.draw_cell_glyph(buf, w, h, c, x, y, scheme.bg, &clip);
+                    self.draw_cell_glyph(cv, c, x, y, scheme.bg, clip);
                 }
             }
         }
@@ -679,14 +654,12 @@ impl Renderer {
 
     fn draw_cell_glyph(
         &mut self,
-        buf: &mut [u32],
-        w: i32,
-        h: i32,
+        cv: &mut Canvas,
         c: char,
         cell_x: i32,
         cell_y: i32,
         color: u32,
-        clip: &Rect,
+        clip: Rect,
     ) {
         let (cw, ch, ascent) = (self.cell_w, self.cell_h, self.ascent);
         let phase = font::pattern_phase(c, cell_x, cell_y);
@@ -695,7 +668,7 @@ impl Renderer {
         });
         let gx = cell_x + glyph.left;
         let gy = cell_y + self.ascent - glyph.bottom - glyph.height as i32;
-        blend_glyph(buf, w, h, gx, gy, glyph, color, clip, self.bitmap_text);
+        cv.blend_glyph(gx, gy, glyph, color, clip, self.bitmap_text);
     }
 
     fn measure_title(&mut self, text: &str) -> i32 {
@@ -708,21 +681,19 @@ impl Renderer {
 
     fn draw_title_text(
         &mut self,
-        buf: &mut [u32],
-        w: i32,
-        h: i32,
+        cv: &mut Canvas,
         text: &str,
         x: i32,
         baseline: i32,
         color: u32,
     ) {
-        let clip = Rect { x: 0, y: 0, w, h };
+        let clip = cv.bounds();
         let mut pen = x as f32;
         for c in text.chars() {
             let glyph = self.title_glyphs.entry(c).or_insert_with(|| self.title_face.rasterize(c));
             let gx = pen.round() as i32 + glyph.left;
             let gy = baseline - glyph.bottom - glyph.height as i32;
-            blend_glyph(buf, w, h, gx, gy, glyph, color, &clip, self.bitmap_text);
+            cv.blend_glyph(gx, gy, glyph, color, clip, self.bitmap_text);
             pen += glyph.advance;
         }
     }
@@ -779,98 +750,110 @@ fn dim(color: u32) -> u32 {
 
 // ─── 低レベル描画 ───
 
-fn fill_rect(buf: &mut [u32], bw: i32, bh: i32, x: i32, y: i32, w: i32, h: i32, color: u32) {
-    let x0 = x.clamp(0, bw);
-    let y0 = y.clamp(0, bh);
-    let x1 = (x + w).clamp(0, bw);
-    let y1 = (y + h).clamp(0, bh);
-    if x1 <= x0 || y1 <= y0 { return; }
-    for row in y0..y1 {
-        let start = (row * bw + x0) as usize;
-        let end = (row * bw + x1) as usize;
-        buf[start..end].fill(color);
-    }
-}
-
-fn fill_rect_clipped(
-    buf: &mut [u32],
-    bw: i32,
-    bh: i32,
-    x: i32,
-    y: i32,
+/// ピクセルバッファとその寸法。矩形はバッファからはみ出してよく、はみ出した分は捨てる。
+pub struct Canvas<'a> {
+    buf: &'a mut [u32],
     w: i32,
     h: i32,
-    color: u32,
-    clip: &Rect,
-) {
-    let x0 = x.max(clip.x);
-    let y0 = y.max(clip.y);
-    let x1 = (x + w).min(clip.right());
-    let y1 = (y + h).min(clip.bottom());
-    if x1 > x0 && y1 > y0 {
-        fill_rect(buf, bw, bh, x0, y0, x1 - x0, y1 - y0, color);
-    }
 }
 
-fn fill_circle(buf: &mut [u32], bw: i32, bh: i32, cx: i32, cy: i32, r: i32, color: u32) {
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if dx * dx + dy * dy > r * r {
-                continue;
-            }
-            let (px, py) = (cx + dx, cy + dy);
-            if px >= 0 && px < bw && py >= 0 && py < bh {
-                buf[(py * bw + px) as usize] = color;
+impl<'a> Canvas<'a> {
+    pub fn new(buf: &'a mut [u32], width: u32, height: u32) -> Self {
+        Self { buf, w: width as i32, h: height as i32 }
+    }
+
+    fn bounds(&self) -> Rect {
+        Rect::new(0, 0, self.w, self.h)
+    }
+
+    fn fill(&mut self, r: Rect, color: u32) {
+        let x0 = r.x.clamp(0, self.w);
+        let y0 = r.y.clamp(0, self.h);
+        let x1 = r.right().clamp(0, self.w);
+        let y1 = r.bottom().clamp(0, self.h);
+        if x1 <= x0 || y1 <= y0 { return; }
+        for row in y0..y1 {
+            let start = (row * self.w + x0) as usize;
+            let end = (row * self.w + x1) as usize;
+            self.buf[start..end].fill(color);
+        }
+    }
+
+    fn fill_clipped(&mut self, r: Rect, color: u32, clip: Rect) {
+        let x0 = r.x.max(clip.x);
+        let y0 = r.y.max(clip.y);
+        let x1 = r.right().min(clip.right());
+        let y1 = r.bottom().min(clip.bottom());
+        if x1 > x0 && y1 > y0 {
+            self.fill(Rect::new(x0, y0, x1 - x0, y1 - y0), color);
+        }
+    }
+
+    fn invert(&mut self, r: Rect) {
+        let x0 = r.x.clamp(0, self.w);
+        let x1 = r.right().clamp(0, self.w);
+        let y0 = r.y.clamp(0, self.h);
+        let y1 = r.bottom().clamp(0, self.h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                self.buf[(y * self.w + x) as usize] ^= 0x00FF_FFFF;
             }
         }
     }
-}
 
-fn stroke_rect(buf: &mut [u32], bw: i32, bh: i32, x: i32, y: i32, w: i32, h: i32, t: i32, color: u32) {
-    fill_rect(buf, bw, bh, x, y, w, t, color);
-    fill_rect(buf, bw, bh, x, y + h - t, w, t, color);
-    fill_rect(buf, bw, bh, x, y, t, h, color);
-    fill_rect(buf, bw, bh, x + w - t, y, t, h, color);
-}
-
-fn blend_glyph(
-    buf: &mut [u32],
-    bw: i32,
-    bh: i32,
-    gx: i32,
-    gy: i32,
-    glyph: &Glyph,
-    color: u32,
-    clip: &Rect,
-    bitmap_text: bool,
-) {
-    let (fr, fg_, fb) = ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
-    for row in 0..glyph.height as i32 {
-        let py = gy + row;
-        if py < clip.y || py >= clip.bottom() || py < 0 || py >= bh {
-            continue;
+    fn circle(&mut self, cx: i32, cy: i32, r: i32, color: u32) {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy > r * r {
+                    continue;
+                }
+                let (px, py) = (cx + dx, cy + dy);
+                if px >= 0 && px < self.w && py >= 0 && py < self.h {
+                    self.buf[(py * self.w + px) as usize] = color;
+                }
+            }
         }
-        for col in 0..glyph.width as i32 {
-            let px = gx + col;
-            if px < clip.x || px >= clip.right() || px < 0 || px >= bw {
+    }
+
+    fn stroke(&mut self, r: Rect, t: i32, color: u32) {
+        self.fill(Rect::new(r.x, r.y, r.w, t), color);
+        self.fill(Rect::new(r.x, r.y + r.h - t, r.w, t), color);
+        self.fill(Rect::new(r.x, r.y, t, r.h), color);
+        self.fill(Rect::new(r.x + r.w - t, r.y, t, r.h), color);
+    }
+
+    /// グリフの左上を (gx, gy) に置いて合成する。`clip` とバッファの外は描かない。
+    fn blend_glyph(&mut self, gx: i32, gy: i32, glyph: &Glyph, color: u32, clip: Rect, bitmap_text: bool) {
+        let (x_min, x_max) = (clip.x.max(0), clip.right().min(self.w));
+        let (y_min, y_max) = (clip.y.max(0), clip.bottom().min(self.h));
+        let (fr, fg_, fb) = ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+        for row in 0..glyph.height as i32 {
+            let py = gy + row;
+            if py < y_min || py >= y_max {
                 continue;
             }
-            let coverage = glyph.coverage[(row * glyph.width as i32 + col) as usize] as u32;
-            let a = if bitmap_text { if coverage >= 128 { 255 } else { 0 } } else { coverage };
-            if a == 0 {
-                continue;
+            for col in 0..glyph.width as i32 {
+                let px = gx + col;
+                if px < x_min || px >= x_max {
+                    continue;
+                }
+                let coverage = glyph.coverage[(row * glyph.width as i32 + col) as usize] as u32;
+                let a = if bitmap_text { if coverage >= 128 { 255 } else { 0 } } else { coverage };
+                if a == 0 {
+                    continue;
+                }
+                let idx = (py * self.w + px) as usize;
+                if a == 255 {
+                    self.buf[idx] = color;
+                    continue;
+                }
+                let dst = self.buf[idx];
+                let (dr, dg, db) = ((dst >> 16) & 0xFF, (dst >> 8) & 0xFF, dst & 0xFF);
+                let r = (fr * a + dr * (255 - a)) / 255;
+                let g = (fg_ * a + dg * (255 - a)) / 255;
+                let b = (fb * a + db * (255 - a)) / 255;
+                self.buf[idx] = (r << 16) | (g << 8) | b;
             }
-            let idx = (py * bw + px) as usize;
-            if a == 255 {
-                buf[idx] = color;
-                continue;
-            }
-            let dst = buf[idx];
-            let (dr, dg, db) = ((dst >> 16) & 0xFF, (dst >> 8) & 0xFF, dst & 0xFF);
-            let r = (fr * a + dr * (255 - a)) / 255;
-            let g = (fg_ * a + dg * (255 - a)) / 255;
-            let b = (fb * a + db * (255 - a)) / 255;
-            buf[idx] = (r << 16) | (g << 8) | b;
         }
     }
 }
@@ -937,9 +920,9 @@ mod tests {
         let mut crisp = [0x0000FF; 3];
         let mut smooth = crisp;
         let glyph = Glyph { width: 3, height: 1, coverage: vec![127, 128, 255], ..Glyph::default() };
-        let clip = Rect { x: 0, y: 0, w: 3, h: 1 };
-        blend_glyph(&mut crisp, 3, 1, 0, 0, &glyph, 0x00FF00, &clip, true);
-        blend_glyph(&mut smooth, 3, 1, 0, 0, &glyph, 0x00FF00, &clip, false);
+        let clip = Rect::new(0, 0, 3, 1);
+        Canvas::new(&mut crisp, 3, 1).blend_glyph(0, 0, &glyph, 0x00FF00, clip, true);
+        Canvas::new(&mut smooth, 3, 1).blend_glyph(0, 0, &glyph, 0x00FF00, clip, false);
         assert_eq!(crisp, [0x0000FF, 0x00FF00, 0x00FF00]);
         assert_ne!(smooth[0], crisp[0]);
         assert_ne!(smooth[1], crisp[1]);

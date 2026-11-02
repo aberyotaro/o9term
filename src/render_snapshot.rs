@@ -13,7 +13,7 @@ use alacritty_terminal::vte::ansi::Processor;
 
 use crate::ime::Preedit;
 use crate::panes::{SplitDir, SplitterHit};
-use crate::renderer::{Layout, Rect, Renderer};
+use crate::renderer::{Canvas, Layout, Rect, Renderer};
 use crate::term::GridSize;
 use crate::theme;
 
@@ -63,7 +63,8 @@ fn render_snapshot() {
                 let mut buf = vec![0u32; (w * h) as usize];
 
                 for focused in [true, false] {
-                    r.draw_chrome(&mut buf, w, h, &layout, "~/src/日本語 ✻", focused);
+                    let mut cv = Canvas::new(&mut buf, w, h);
+                    r.draw_chrome(&mut cv, &layout, "~/src/日本語 ✻", focused);
                     let c = layout.content;
                     let left = Rect { w: c.w / 2 - 3, ..c };
                     let right = Rect { x: c.x + c.w / 2 + 3, w: c.w - c.w / 2 - 3, ..c };
@@ -75,25 +76,26 @@ fn render_snapshot() {
                         if !active {
                             term.scroll_display(Scroll::Delta(3));
                         }
-                        r.draw_pane(&mut buf, w, h, pane, &term, active, scheme);
+                        r.draw_pane(&mut cv, pane, &term, active, scheme);
                         if active {
                             let preedit = Preedit::new("にほんご入力".to_string(), Some((3, 9)));
-                            r.draw_preedit(&mut buf, w, h, pane, &term, &preedit, scheme);
+                            r.draw_preedit(&mut cv, pane, &term, &preedit, scheme);
                         } else {
-                            r.draw_visual_bell(&mut buf, w, h, Rect { h: pane.h / 3, ..pane });
+                            r.draw_visual_bell(&mut cv, Rect { h: pane.h / 3, ..pane });
                         }
                     }
                     let splitter = Rect { x: c.x + c.w / 2 - 3, w: 6, ..c };
-                    r.draw_splitter(&mut buf, w, h, &SplitterHit { index: 0, dir: SplitDir::Vertical, track: c, rect: splitter });
+                    r.draw_splitter(&mut cv, &SplitterHit { index: 0, dir: SplitDir::Vertical, track: c, rect: splitter });
                     let horizontal = Rect { y: c.y + c.h / 2, h: 6, ..right };
-                    r.draw_splitter(&mut buf, w, h, &SplitterHit { index: 1, dir: SplitDir::Horizontal, track: right, rect: horizontal });
-                    r.draw_grow_box(&mut buf, w, h, layout.grow_box);
-                    r.draw_drop_outline(&mut buf, w, h, Rect { w: c.w / 3, ..right });
+                    r.draw_splitter(&mut cv, &SplitterHit { index: 1, dir: SplitDir::Horizontal, track: right, rect: horizontal });
+                    r.draw_grow_box(&mut cv, layout.grow_box);
+                    r.draw_drop_outline(&mut cv, Rect { w: c.w / 3, ..right });
                     write(&dir, &format!("window-{tag}-f{focused}"), &buf, w, h);
                 }
 
-                r.draw_chrome(&mut buf, w, h, &layout, "設定", true);
-                let hits = r.draw_settings(&mut buf, w, h, &layout, scheme_index);
+                let mut cv = Canvas::new(&mut buf, w, h);
+                r.draw_chrome(&mut cv, &layout, "設定", true);
+                let hits = r.draw_settings(&mut cv, &layout, scheme_index);
                 assert_eq!(hits.len(), theme::SCHEMES.len() + 1);
                 write(&dir, &format!("settings-{tag}"), &buf, w, h);
             }

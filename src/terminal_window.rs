@@ -16,7 +16,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{ResizeDirection, Window, WindowId};
 
 use crate::{clipboard, config, ime, term, theme, window_shade};
-use crate::renderer::{Layout, Rect, Renderer, ScrollbarLayout, ScrollbarPart};
+use crate::renderer::{Canvas, Layout, Rect, Renderer, ScrollbarLayout, ScrollbarPart};
 use crate::panes::{Pane, PaneNode, Panes, SplitDir, SplitterHit};
 use crate::term::{PaneId, Terminal, UserEvent};
 
@@ -410,14 +410,8 @@ impl TerminalWindow {
 
         let title = self.panes.title().to_string();
 
-        renderer.draw_chrome(
-            &mut buffer,
-            size.width,
-            size.height,
-            &self.layout,
-            &title,
-            self.focused,
-        );
+        let mut cv = Canvas::new(&mut buffer, size.width, size.height);
+        renderer.draw_chrome(&mut cv, &self.layout, &title, self.focused);
 
         if self.shade.is_shaded() {
             let _ = buffer.present();
@@ -429,15 +423,7 @@ impl TerminalWindow {
             if let Some(pane) = self.panes.root.find_pane(*id) {
                 let term = pane.terminal.term.lock();
                 let active = self.focused && self.panes.focused == *id;
-                renderer.draw_pane(
-                    &mut buffer,
-                    size.width,
-                    size.height,
-                    *rect,
-                    &term,
-                    active,
-                    scheme,
-                );
+                renderer.draw_pane(&mut cv, *rect, &term, active, scheme);
                 if active {
                     let grid = renderer.grid_rect(*rect);
                     let point = term.grid().cursor.point;
@@ -453,36 +439,34 @@ impl TerminalWindow {
                         x: grid.x + col * cw, y: grid.y + row * ch, w: cw, h: ch,
                     };
                     if let Some(preedit) = self.ime.preedit()
-                        && let Some(area) = renderer.draw_preedit(
-                            &mut buffer, size.width, size.height, *rect, &term, preedit, scheme,
-                        ) { anchor = area; }
+                        && let Some(area) = renderer.draw_preedit(&mut cv, *rect, &term, preedit, scheme)
+                    { anchor = area; }
                     window.set_ime_cursor_area(
                         PhysicalPosition::new(anchor.x, anchor.y),
                         PhysicalSize::new(anchor.w.max(1) as u32, anchor.h.max(1) as u32),
                     );
                 }
                 if self.bells.iter().any(|(pane_id, until)| *pane_id == *id && *until > Instant::now()) {
-                    renderer.draw_visual_bell(&mut buffer, size.width, size.height, *rect);
+                    renderer.draw_visual_bell(&mut cv, *rect);
                 }
             }
         }
         for sh in &self.splitter_hits {
-            renderer.draw_splitter(&mut buffer, size.width, size.height, sh);
+            renderer.draw_splitter(&mut cv, sh);
         }
-        renderer.draw_grow_box(&mut buffer, size.width, size.height, self.layout.grow_box);
+        renderer.draw_grow_box(&mut cv, self.layout.grow_box);
 
         // ペイン移動中の視覚フィードバック (最前面)。
         if let Some(MouseDrag::Pane(drag)) = &self.drag
             && drag.started {
             if let Some(DropTarget { pane, side }) = drag.target
                 && let Some((_, rect)) = self.pane_hits.iter().find(|(id, _)| *id == pane) {
-                renderer.draw_drop_outline(&mut buffer, size.width, size.height, side.preview(*rect));
+                renderer.draw_drop_outline(&mut cv, side.preview(*rect));
             }
             let w = (120.0 * renderer.scale) as i32;
             let h = (36.0 * renderer.scale) as i32;
             let (x, y) = (self.cursor_pos.0 as i32, self.cursor_pos.1 as i32);
-            renderer.draw_drop_outline(&mut buffer, size.width, size.height,
-                Rect { x: x - w / 2, y: y - h / 2, w, h });
+            renderer.draw_drop_outline(&mut cv, Rect { x: x - w / 2, y: y - h / 2, w, h });
         }
 
         let _ = buffer.present();
@@ -612,22 +596,15 @@ impl TerminalWindow {
         let Ok(mut buffer) = st.surface.buffer_mut() else { return };
 
         let layout = Layout::compute(size.width, size.height, renderer.scale);
-        renderer.draw_chrome(
-            &mut buffer,
-            size.width,
-            size.height,
-            &layout,
-            "設定",
-            st.focused,
-        );
+        let mut cv = Canvas::new(&mut buffer, size.width, size.height);
+        renderer.draw_chrome(&mut cv, &layout, "設定", st.focused);
         st.layout = layout;
         if st.shade.is_shaded() {
             st.row_hits.clear();
             let _ = buffer.present();
             return;
         }
-        let hits =
-            renderer.draw_settings(&mut buffer, size.width, size.height, &layout, self.scheme_index);
+        let hits = renderer.draw_settings(&mut cv, &layout, self.scheme_index);
         st.row_hits = hits;
         let _ = buffer.present();
     }
