@@ -2,6 +2,19 @@
 
 Develop with `cargo run`; validate with `cargo test`.
 
+## Render snapshots
+
+Changes that must not alter pixels can be checked with the ignored
+`render_snapshot` test. It draws every window part at three scales, every
+colour scheme and both text modes. Write frames before and after the change,
+then compare the two directories:
+
+```sh
+O9_SNAPSHOT_DIR=/tmp/o9-before cargo test --release render_snapshot -- --ignored
+O9_SNAPSHOT_DIR=/tmp/o9-after cargo test --release render_snapshot -- --ignored
+diff -rq /tmp/o9-before /tmp/o9-after
+```
+
 ## Window lifecycle
 
 `src/main.rs` coordinates independent terminal windows in one event loop and

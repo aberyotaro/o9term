@@ -38,6 +38,7 @@ src/
 ├── term.rs      … PTYとalacritty_terminalの起動・接続
 ├── renderer.rs  … Platinumクローム + グリッドのCPUレンダラ
 ├── font.rs      … CoreTextでグリフを濃さの表にする。ブロック要素はマスいっぱいに描く
+├── render_snapshot.rs … 描画を変えない変更を確かめるテスト（docs/development.md）
 ├── theme.rs     … Platinum配色・ANSIパレット・カラースキーマ定義
 ├── config.rs    … 配色・文字描画設定の保存・読み込み
 ├── clipboard.rs … 選択文字列のコピー・貼り付け
