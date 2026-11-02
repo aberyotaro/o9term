@@ -71,6 +71,129 @@ fn split_shortcut(key: &Key, modifiers: ModifiersState) -> Option<Side> {
     None
 }
 
+/// キー入力を PTY へ送るバイト列に変換する。表にないキーは `text` (空は無視) をそのまま送る。
+fn key_bytes(key: &Key, text: Option<&str>, mods: ModifiersState, app_cursor: bool) -> Option<Vec<u8>> {
+    let arrow = |c: u8| -> Vec<u8> {
+        if app_cursor {
+            vec![0x1b, b'O', c]
+        } else {
+            vec![0x1b, b'[', c]
+        }
+    };
+
+    let bytes: Option<Vec<u8>> = match key {
+        Key::Named(NamedKey::Enter) => Some(b"\r".to_vec()),
+        Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
+        Key::Named(NamedKey::Tab) => Some(b"\t".to_vec()),
+        Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
+        Key::Named(NamedKey::ArrowUp) => Some(arrow(b'A')),
+        Key::Named(NamedKey::ArrowDown) => Some(arrow(b'B')),
+        Key::Named(NamedKey::ArrowRight) => Some(arrow(b'C')),
+        Key::Named(NamedKey::ArrowLeft) => Some(arrow(b'D')),
+        Key::Named(NamedKey::Home) => Some(b"\x1b[H".to_vec()),
+        Key::Named(NamedKey::End) => Some(b"\x1b[F".to_vec()),
+        Key::Named(NamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
+        Key::Named(NamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
+        Key::Named(NamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
+        Key::Named(NamedKey::Space) if mods.control_key() => Some(vec![0x00]),
+        Key::Character(s) if mods.control_key() => {
+            // Ctrl+A..Z など制御文字へ変換
+            s.chars()
+                .next()
+                .filter(char::is_ascii)
+                .map(|c| vec![(c.to_ascii_uppercase() as u8) & 0x1f])
+        }
+        _ => None,
+    };
+
+    bytes.or_else(|| text.filter(|t| !t.is_empty()).map(|t| t.as_bytes().to_vec()))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    fn bytes(key: Key, text: Option<&str>, mods: ModifiersState, app_cursor: bool) -> Option<Vec<u8>> {
+        key_bytes(&key, text, mods, app_cursor)
+    }
+
+    fn named(key: NamedKey, app_cursor: bool) -> Option<Vec<u8>> {
+        bytes(Key::Named(key), None, ModifiersState::empty(), app_cursor)
+    }
+
+    #[test]
+    fn printable_text_is_sent_as_utf8() {
+        let none = ModifiersState::empty();
+        assert_eq!(bytes(Key::Character("a".into()), Some("a"), none, false), Some(b"a".to_vec()));
+        assert_eq!(bytes(Key::Character("あ".into()), Some("あ"), none, false), Some("あ".as_bytes().to_vec()));
+        assert_eq!(bytes(Key::Character("A".into()), Some("A"), ModifiersState::SHIFT, false), Some(b"A".to_vec()));
+        assert_eq!(bytes(Key::Named(NamedKey::Space), Some(" "), none, false), Some(b" ".to_vec()));
+    }
+
+    #[test]
+    fn key_without_text_sends_nothing() {
+        let none = ModifiersState::empty();
+        assert_eq!(bytes(Key::Character("a".into()), None, none, false), None);
+        assert_eq!(bytes(Key::Character("a".into()), Some(""), none, false), None);
+        assert_eq!(bytes(Key::Named(NamedKey::F1), None, none, false), None);
+        assert_eq!(bytes(Key::Named(NamedKey::Shift), None, ModifiersState::SHIFT, false), None);
+    }
+
+    #[test]
+    fn editing_keys() {
+        assert_eq!(named(NamedKey::Enter, false), Some(b"\r".to_vec()));
+        assert_eq!(named(NamedKey::Backspace, false), Some(vec![0x7f]));
+        assert_eq!(named(NamedKey::Tab, false), Some(b"\t".to_vec()));
+        assert_eq!(named(NamedKey::Escape, false), Some(vec![0x1b]));
+        assert_eq!(named(NamedKey::Delete, false), Some(b"\x1b[3~".to_vec()));
+    }
+
+    #[test]
+    fn shift_tab_is_a_plain_tab() {
+        let shift = ModifiersState::SHIFT;
+        assert_eq!(bytes(Key::Named(NamedKey::Tab), None, shift, false), Some(b"\t".to_vec()));
+    }
+
+    #[test]
+    fn arrows_follow_the_cursor_key_mode() {
+        for (key, c) in [
+            (NamedKey::ArrowUp, b'A'), (NamedKey::ArrowDown, b'B'),
+            (NamedKey::ArrowRight, b'C'), (NamedKey::ArrowLeft, b'D'),
+        ] {
+            assert_eq!(named(key, false), Some(vec![0x1b, b'[', c]));
+            assert_eq!(named(key, true), Some(vec![0x1b, b'O', c]));
+        }
+    }
+
+    #[test]
+    fn navigation_keys_ignore_the_cursor_key_mode() {
+        for app_cursor in [false, true] {
+            assert_eq!(named(NamedKey::Home, app_cursor), Some(b"\x1b[H".to_vec()));
+            assert_eq!(named(NamedKey::End, app_cursor), Some(b"\x1b[F".to_vec()));
+            assert_eq!(named(NamedKey::PageUp, app_cursor), Some(b"\x1b[5~".to_vec()));
+            assert_eq!(named(NamedKey::PageDown, app_cursor), Some(b"\x1b[6~".to_vec()));
+        }
+    }
+
+    #[test]
+    fn ctrl_letter_becomes_a_control_byte() {
+        let ctrl = ModifiersState::CONTROL;
+        assert_eq!(bytes(Key::Character("a".into()), Some("\u{1}"), ctrl, false), Some(vec![0x01]));
+        assert_eq!(bytes(Key::Character("c".into()), Some("\u{3}"), ctrl, false), Some(vec![0x03]));
+        assert_eq!(bytes(Key::Character("C".into()), None, ctrl, false), Some(vec![0x03]));
+        assert_eq!(bytes(Key::Character("z".into()), None, ctrl, false), Some(vec![0x1a]));
+        assert_eq!(bytes(Key::Named(NamedKey::Space), None, ctrl, false), Some(vec![0x00]));
+    }
+
+    #[test]
+    fn alt_does_not_add_an_escape_prefix() {
+        let alt = ModifiersState::ALT;
+        assert_eq!(bytes(Key::Character("b".into()), Some("∫"), alt, false), Some("∫".as_bytes().to_vec()));
+        assert_eq!(bytes(Key::Character("b".into()), None, alt, false), None);
+        assert_eq!(bytes(Key::Named(NamedKey::ArrowLeft), None, alt, false), Some(b"\x1b[D".to_vec()));
+    }
+}
+
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
@@ -705,42 +828,7 @@ impl TerminalWindow {
 
         let Some(terminal) = self.focused_terminal() else { return };
         let app_cursor = terminal.term.lock().mode().contains(TermMode::APP_CURSOR);
-        let arrow = |c: u8| -> Vec<u8> {
-            if app_cursor {
-                vec![0x1b, b'O', c]
-            } else {
-                vec![0x1b, b'[', c]
-            }
-        };
-
-        let bytes: Option<Vec<u8>> = match &event.logical_key {
-            Key::Named(NamedKey::Enter) => Some(b"\r".to_vec()),
-            Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
-            Key::Named(NamedKey::Tab) => Some(b"\t".to_vec()),
-            Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
-            Key::Named(NamedKey::ArrowUp) => Some(arrow(b'A')),
-            Key::Named(NamedKey::ArrowDown) => Some(arrow(b'B')),
-            Key::Named(NamedKey::ArrowRight) => Some(arrow(b'C')),
-            Key::Named(NamedKey::ArrowLeft) => Some(arrow(b'D')),
-            Key::Named(NamedKey::Home) => Some(b"\x1b[H".to_vec()),
-            Key::Named(NamedKey::End) => Some(b"\x1b[F".to_vec()),
-            Key::Named(NamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
-            Key::Named(NamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
-            Key::Named(NamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
-            Key::Named(NamedKey::Space) if mods.control_key() => Some(vec![0x00]),
-            Key::Character(s) if mods.control_key() => {
-                // Ctrl+A..Z など制御文字へ変換
-                s.chars()
-                    .next()
-                    .filter(char::is_ascii)
-                    .map(|c| vec![(c.to_ascii_uppercase() as u8) & 0x1f])
-            }
-            _ => None,
-        };
-
-        let bytes = bytes.or_else(|| {
-            event.text.as_ref().filter(|t| !t.is_empty()).map(|t| t.as_bytes().to_vec())
-        });
+        let bytes = key_bytes(&event.logical_key, event.text.as_deref(), mods, app_cursor);
 
         if let Some(bytes) = bytes {
             // macOS が IME で消費したキーは winit が抑制する。
