@@ -24,6 +24,12 @@ pub enum PaneNode<T = Terminal> {
     Split { dir: SplitDir, ratio: f32, first: Box<PaneNode<T>>, second: Box<PaneNode<T>> },
 }
 
+impl<T> Default for PaneNode<T> {
+    fn default() -> Self {
+        PaneNode::Empty
+    }
+}
+
 /// スプリッターのヒットテスト・描画用情報。
 /// `index` は木の行きがけ順の通し番号で、ドラッグ中の比率更新に使う。
 pub struct SplitterHit {
@@ -48,33 +54,23 @@ impl<T> PaneNode<T> {
             PaneNode::Leaf(pane) => panes.push((pane.id, rect)),
             PaneNode::Split { dir, ratio, first, second } => {
                 let index = splitters.len();
+                let total = match dir {
+                    SplitDir::Vertical => rect.w,
+                    SplitDir::Horizontal => rect.h,
+                };
+                let first_len = (((total - sw).max(0)) as f32 * ratio).round() as i32;
+                let second_len = (total - first_len - sw).max(0);
                 let (r1, sp, r2) = match dir {
-                    SplitDir::Vertical => {
-                        let fw = (((rect.w - sw).max(0)) as f32 * ratio).round() as i32;
-                        (
-                            Rect { x: rect.x, y: rect.y, w: fw, h: rect.h },
-                            Rect { x: rect.x + fw, y: rect.y, w: sw, h: rect.h },
-                            Rect {
-                                x: rect.x + fw + sw,
-                                y: rect.y,
-                                w: (rect.w - fw - sw).max(0),
-                                h: rect.h,
-                            },
-                        )
-                    }
-                    SplitDir::Horizontal => {
-                        let fh = (((rect.h - sw).max(0)) as f32 * ratio).round() as i32;
-                        (
-                            Rect { x: rect.x, y: rect.y, w: rect.w, h: fh },
-                            Rect { x: rect.x, y: rect.y + fh, w: rect.w, h: sw },
-                            Rect {
-                                x: rect.x,
-                                y: rect.y + fh + sw,
-                                w: rect.w,
-                                h: (rect.h - fh - sw).max(0),
-                            },
-                        )
-                    }
+                    SplitDir::Vertical => (
+                        Rect { w: first_len, ..rect },
+                        Rect { x: rect.x + first_len, w: sw, ..rect },
+                        Rect { x: rect.x + first_len + sw, w: second_len, ..rect },
+                    ),
+                    SplitDir::Horizontal => (
+                        Rect { h: first_len, ..rect },
+                        Rect { y: rect.y + first_len, h: sw, ..rect },
+                        Rect { y: rect.y + first_len + sw, h: second_len, ..rect },
+                    ),
                 };
                 splitters.push(SplitterHit { index, dir: *dir, track: rect, rect: sp });
                 first.layout(r1, sw, panes, splitters);
@@ -106,32 +102,30 @@ impl<T> PaneNode<T> {
     }
 
     /// `target` の葉を `dir` で分割し、`subtree` を `before` に応じて
-    /// 前側 (左/上) または後側 (右/下) に挿入する。
+    /// 前側 (左/上) または後側 (右/下) に挿入する。見つからなければ `subtree` を返す。
     pub fn dock_subtree(
         &mut self,
         target: PaneId,
         dir: SplitDir,
         before: bool,
-        subtree: &mut Option<PaneNode<T>>,
-    ) -> bool {
+        subtree: PaneNode<T>,
+    ) -> Result<(), PaneNode<T>> {
         match self {
             PaneNode::Leaf(pane) if pane.id == target => {
-                let Some(sub) = subtree.take() else { return false };
-                let old = std::mem::replace(self, PaneNode::Empty);
-                let (first, second) = if before { (sub, old) } else { (old, sub) };
+                let old = std::mem::take(self);
+                let (first, second) = if before { (subtree, old) } else { (old, subtree) };
                 *self = PaneNode::Split {
                     dir,
                     ratio: 0.5,
                     first: Box::new(first),
                     second: Box::new(second),
                 };
-                true
+                Ok(())
             }
-            PaneNode::Split { first, second, .. } => {
-                first.dock_subtree(target, dir, before, subtree)
-                    || second.dock_subtree(target, dir, before, subtree)
-            }
-            _ => false,
+            PaneNode::Split { first, second, .. } => first
+                .dock_subtree(target, dir, before, subtree)
+                .or_else(|subtree| second.dock_subtree(target, dir, before, subtree)),
+            _ => Err(subtree),
         }
     }
 
@@ -139,7 +133,7 @@ impl<T> PaneNode<T> {
     pub fn take_pane(&mut self, id: PaneId) -> Option<Pane<T>> {
         match self {
             PaneNode::Leaf(pane) if pane.id == id => {
-                match std::mem::replace(self, PaneNode::Empty) {
+                match std::mem::take(self) {
                     PaneNode::Leaf(pane) => Some(pane),
                     _ => unreachable!(),
                 }
@@ -147,9 +141,9 @@ impl<T> PaneNode<T> {
             PaneNode::Split { first, second, .. } => {
                 let pane = first.take_pane(id).or_else(|| second.take_pane(id))?;
                 if matches!(**first, PaneNode::Empty) {
-                    *self = std::mem::replace(&mut **second, PaneNode::Empty);
+                    *self = std::mem::take(&mut **second);
                 } else if matches!(**second, PaneNode::Empty) {
-                    *self = std::mem::replace(&mut **first, PaneNode::Empty);
+                    *self = std::mem::take(&mut **first);
                 }
                 Some(pane)
             }
@@ -247,8 +241,7 @@ impl<T> Panes<T> {
             return false;
         }
         let Some(pane) = self.root.take_pane(source) else { return false };
-        let mut carrier = Some(PaneNode::Leaf(pane));
-        let inserted = self.root.dock_subtree(target, dir, before, &mut carrier);
+        let inserted = self.root.dock_subtree(target, dir, before, PaneNode::Leaf(pane)).is_ok();
         // A validated destination cannot disappear when a distinct leaf is removed.
         debug_assert!(inserted);
         self.focused = source;
@@ -342,9 +335,7 @@ mod tests {
             for before in [true, false] {
                 let closed = Rc::new(RefCell::new(Vec::new()));
                 let mut panes = Panes::new(pane(1, &closed));
-                let mut carrier = Some(leaf(2, &closed));
-                assert!(panes.root.dock_subtree(1, dir, before, &mut carrier));
-                assert!(carrier.is_none());
+                assert!(panes.root.dock_subtree(1, dir, before, leaf(2, &closed)).is_ok());
                 assert_valid(&panes, &[1, 2]);
                 let mut positions = Vec::new();
                 let mut splitters = Vec::new();
@@ -420,10 +411,10 @@ mod tests {
     fn invalid_dock_keeps_subtree_and_sessions_owned_by_caller() {
         let closed = Rc::new(RefCell::new(Vec::new()));
         let mut panes = Panes::new(pane(1, &closed));
-        let mut carrier = Some(split(SplitDir::Vertical, 0.25, leaf(2, &closed), leaf(3, &closed)));
-        assert!(!panes.root.dock_subtree(9, SplitDir::Horizontal, true, &mut carrier));
+        let subtree = split(SplitDir::Vertical, 0.25, leaf(2, &closed), leaf(3, &closed));
+        let Err(returned) = panes.root.dock_subtree(9, SplitDir::Horizontal, true, subtree) else { panic!() };
         assert_valid(&panes, &[1]);
-        assert_eq!(ids(carrier.as_ref().unwrap()), [2, 3]);
+        assert_eq!(ids(&returned), [2, 3]);
         assert!(closed.borrow().is_empty());
     }
 
@@ -431,9 +422,8 @@ mod tests {
     fn docking_subtree_preserves_its_layout_and_sessions() {
         let closed = Rc::new(RefCell::new(Vec::new()));
         let mut panes = Panes::new(pane(1, &closed));
-        let mut carrier = Some(split(SplitDir::Vertical, 0.25, leaf(2, &closed), leaf(3, &closed)));
-        assert!(panes.root.dock_subtree(1, SplitDir::Horizontal, true, &mut carrier));
-        assert!(carrier.is_none());
+        let subtree = split(SplitDir::Vertical, 0.25, leaf(2, &closed), leaf(3, &closed));
+        assert!(panes.root.dock_subtree(1, SplitDir::Horizontal, true, subtree).is_ok());
         assert_valid(&panes, &[1, 2, 3]);
         assert_eq!(ids(&panes.root), [2, 3, 1]);
         let PaneNode::Split { first, .. } = &panes.root else { panic!() };
@@ -497,6 +487,36 @@ mod tests {
         let mut all_closed = closed.borrow().clone();
         all_closed.sort_unstable();
         assert_eq!(all_closed, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn layout_rounds_the_first_half_and_clamps_a_too_small_rect() {
+        let closed = Rc::new(RefCell::new(Vec::new()));
+        let rects = |dir, rect| {
+            let node = split(dir, 0.3, leaf(1, &closed), leaf(2, &closed));
+            let (mut panes, mut splitters) = (Vec::new(), Vec::new());
+            node.layout(rect, 6, &mut panes, &mut splitters);
+            let r = |r: Rect| (r.x, r.y, r.w, r.h);
+            (r(panes[0].1), r(splitters[0].rect), r(panes[1].1), r(splitters[0].track))
+        };
+        let rect = Rect { x: 5, y: 7, w: 103, h: 57 };
+        assert_eq!(
+            rects(SplitDir::Vertical, rect),
+            ((5, 7, 29, 57), (34, 7, 6, 57), (40, 7, 68, 57), (5, 7, 103, 57)),
+        );
+        assert_eq!(
+            rects(SplitDir::Horizontal, rect),
+            ((5, 7, 103, 15), (5, 22, 103, 6), (5, 28, 103, 36), (5, 7, 103, 57)),
+        );
+        let tiny = Rect { x: 5, y: 7, w: 3, h: 2 };
+        assert_eq!(
+            rects(SplitDir::Vertical, tiny),
+            ((5, 7, 0, 2), (5, 7, 6, 2), (11, 7, 0, 2), (5, 7, 3, 2)),
+        );
+        assert_eq!(
+            rects(SplitDir::Horizontal, tiny),
+            ((5, 7, 3, 0), (5, 7, 3, 6), (5, 13, 3, 0), (5, 7, 3, 2)),
+        );
     }
 
     #[test]

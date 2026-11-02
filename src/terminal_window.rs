@@ -667,8 +667,7 @@ impl TerminalWindow {
         let Some(pane) = self.new_pane() else { return };
         self.cancel_pointer_gestures();
         let new_id = pane.id;
-        let mut carrier = Some(PaneNode::Leaf(pane));
-        if self.panes.root.dock_subtree(target, dir, before, &mut carrier) {
+        if self.panes.root.dock_subtree(target, dir, before, PaneNode::Leaf(pane)).is_ok() {
             self.panes.focused = new_id;
             self.refresh();
         }
