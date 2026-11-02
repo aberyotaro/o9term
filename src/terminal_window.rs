@@ -285,9 +285,31 @@ fn alternate_scroll_bytes(lines: i32, app_cursor: bool) -> Vec<u8> {
     [0x1b, prefix, arrow].repeat(lines.unsigned_abs() as usize)
 }
 
+/// マウス報告を有効にしたアプリ (全画面の Claude Code, vim の mouse=a など) へ、
+/// ホイールをボタン 64 (上) / 65 (下) の押下として 1 行に 1 回送る。`col`, `row` は 0 始まり。
+fn mouse_wheel_bytes(lines: i32, col: usize, row: usize, sgr: bool) -> Vec<u8> {
+    let button = if lines > 0 { 64 } else { 65 };
+    let report = if sgr {
+        format!("\x1b[<{button};{};{}M", col + 1, row + 1).into_bytes()
+    } else {
+        // 従来形式は 1 バイトに 32 を足して入れるので、223 を超える位置は送れない。
+        let (Ok(c), Ok(r)) = (u8::try_from(col + 1 + 32), u8::try_from(row + 1 + 32)) else { return Vec::new() };
+        vec![0x1b, b'[', b'M', 32 + button, c, r]
+    };
+    report.repeat(lines.unsigned_abs() as usize)
+}
+
 #[cfg(test)]
 mod wheel_tests {
     use super::*;
+
+    #[test]
+    fn mouse_reporting_sends_one_wheel_press_per_line() {
+        assert_eq!(mouse_wheel_bytes(2, 4, 9, true), b"\x1b[<64;5;10M\x1b[<64;5;10M");
+        assert_eq!(mouse_wheel_bytes(-1, 0, 0, true), b"\x1b[<65;1;1M");
+        assert_eq!(mouse_wheel_bytes(1, 0, 0, false), b"\x1b[M`!!");
+        assert!(mouse_wheel_bytes(1, 300, 0, false).is_empty());
+    }
 
     #[test]
     fn a_line_tick_scrolls_three_lines() {
@@ -1016,7 +1038,8 @@ impl TerminalWindow {
         }
     }
 
-    fn selection_point(&self, id: PaneId) -> Option<(Point, CellSide)> {
+    /// マウスカーソル直下の、表示中の画面上のセル (列, 行) と、セルのどちら側か。
+    fn cursor_cell(&self, id: PaneId) -> Option<(usize, usize, CellSide)> {
         let renderer = &self.renderer;
         let rect = self.pane_rect(id)?;
         let grid = renderer.grid_rect(rect);
@@ -1027,13 +1050,16 @@ impl TerminalWindow {
         let x = (self.cursor_pos.0 - grid.x as f64).clamp(0.0, (grid.w - 1).max(0) as f64);
         let y = (self.cursor_pos.1 - grid.y as f64).clamp(0.0, (grid.h - 1).max(0) as f64);
         use alacritty_terminal::grid::Dimensions;
-        let col = (x / cw) as usize;
-        let row = (y / ch) as usize;
-        let point = alacritty_terminal::term::viewport_to_point(
-            term.grid().display_offset(),
-            Point::new(row.min(term.screen_lines() - 1), Column(col.min(term.columns() - 1))));
+        let col = ((x / cw) as usize).min(term.columns() - 1);
+        let row = ((y / ch) as usize).min(term.screen_lines() - 1);
         let side = if x % cw < cw / 2.0 { CellSide::Left } else { CellSide::Right };
-        Some((point, side))
+        Some((col, row, side))
+    }
+
+    fn selection_point(&self, id: PaneId) -> Option<(Point, CellSide)> {
+        let (col, row, side) = self.cursor_cell(id)?;
+        let offset = self.panes.root.find_pane(id)?.terminal.term.lock().grid().display_offset();
+        Some((alacritty_terminal::term::viewport_to_point(offset, Point::new(row, Column(col))), side))
     }
 
     fn toggle_shade(&mut self) {
@@ -1350,13 +1376,14 @@ impl TerminalWindow {
                         .or_else(|| (!self.panes.is_empty()).then_some(self.panes.focused));
                     if let Some(id) = target
                         && let Some(p) = self.panes.root.find_pane(id) {
-                        let mut term = p.terminal.term.lock();
-                        let mode = *term.mode();
-                        if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
-                            drop(term);
+                        let mode = *p.terminal.term.lock().mode();
+                        if mode.intersects(TermMode::MOUSE_MODE) {
+                            let (col, row) = self.cursor_cell(id).map_or((0, 0), |(col, row, _)| (col, row));
+                            p.terminal.write(mouse_wheel_bytes(lines, col, row, mode.contains(TermMode::SGR_MOUSE)));
+                        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
                             p.terminal.write(alternate_scroll_bytes(lines, mode.contains(TermMode::APP_CURSOR)));
                         } else {
-                            term.scroll_display(Scroll::Delta(lines));
+                            p.terminal.term.lock().scroll_display(Scroll::Delta(lines));
                         }
                     }
                     self.redraw();
