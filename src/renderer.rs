@@ -35,6 +35,10 @@ impl Rect {
         Self { x, y, w, h }
     }
 
+    pub fn inset(&self, e: i32) -> Self {
+        Self::new(self.x + e, self.y + e, self.w - 2 * e, self.h - 2 * e)
+    }
+
     pub fn contains(&self, px: f64, py: f64) -> bool {
         px >= self.x as f64
             && px < (self.x + self.w) as f64
@@ -77,7 +81,7 @@ pub struct ScrollbarLayout {
 
 impl ScrollbarLayout {
     pub fn compute(pane: Rect, scale: f64, history_size: usize, screen_lines: usize, offset: usize) -> Self {
-        let s = |v: f64| ((v * scale).round() as i32).max(1);
+        let s = |v: f32| px(v, scale);
         let edge = s(1.0);
         let width = s(16.0).min((pane.w - 2 * edge).max(0));
         let bounds = Rect {
@@ -128,6 +132,11 @@ impl ScrollbarLayout {
     }
 }
 
+/// 論理 px を物理 px に直す。0 にはしない。
+fn px(v: f32, scale: f64) -> i32 {
+    ((v as f64 * scale).round() as i32).max(1)
+}
+
 /// ウィンドウ内の各パーツの配置 (物理ピクセル)。描画とヒットテストで共用する。
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Layout {
@@ -141,7 +150,7 @@ pub struct Layout {
 
 impl Layout {
     pub fn compute(width: u32, height: u32, scale: f64) -> Self {
-        let s = |v: f32| ((v as f64 * scale).round() as i32).max(1);
+        let s = |v: f32| px(v, scale);
         let (w, h) = (width as i32, height as i32);
 
         let f = s(1.0) + s(1.0); // 輪郭線 + 外側ベベル
@@ -207,6 +216,10 @@ impl Renderer {
         }
     }
 
+    fn px(&self, v: f32) -> i32 {
+        px(v, self.scale)
+    }
+
     /// ウィンドウクローム (フレーム・タイトルバー) を描画する。
     /// ペインとスプリッターは呼び出し側がこの後に個別に描く。
     pub fn draw_chrome(
@@ -216,18 +229,13 @@ impl Renderer {
         title: &str,
         focused: bool,
     ) {
-        let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
-        let (w, h) = (cv.w, cv.h);
+        let e = self.px(1.0);
 
         cv.fill(cv.bounds(), theme::FRAME);
         // 外周の輪郭線
-        cv.stroke(cv.bounds(), s(1.0), theme::OUTLINE);
+        cv.stroke(cv.bounds(), e, theme::OUTLINE);
         // 外側ベベル (左上ハイライト・右下シャドウ)
-        let e = s(1.0);
-        cv.fill(Rect::new(e, e, w - 2 * e, e), theme::BEVEL_LIGHT);
-        cv.fill(Rect::new(e, e, e, h - 2 * e), theme::BEVEL_LIGHT);
-        cv.fill(Rect::new(e, h - 2 * e, w - 2 * e, e), theme::BEVEL_DARK);
-        cv.fill(Rect::new(w - 2 * e, e, e, h - 2 * e), theme::BEVEL_DARK);
+        cv.bevel(cv.bounds().inset(e), e, theme::BEVEL_LIGHT, theme::BEVEL_DARK);
 
         self.draw_titlebar(cv, layout, title, focused);
     }
@@ -243,14 +251,11 @@ impl Renderer {
         active: bool,
         scheme: &Scheme,
     ) {
-        let e = ((self.scale).round() as i32).max(1);
+        let e = self.px(1.0);
 
         // 窪みベベル: 左上が影、右下がハイライト
-        cv.fill(Rect::new(rect.x, rect.y, rect.w, e), theme::SUNKEN_DARK);
-        cv.fill(Rect::new(rect.x, rect.y, e, rect.h), theme::SUNKEN_DARK);
-        cv.fill(Rect::new(rect.x, rect.bottom() - e, rect.w, e), theme::SUNKEN_LIGHT);
-        cv.fill(Rect::new(rect.right() - e, rect.y, e, rect.h), theme::SUNKEN_LIGHT);
-        cv.fill(Rect::new(rect.x + e, rect.y + e, rect.w - 2 * e, rect.h - 2 * e), scheme.bg);
+        cv.bevel(rect, e, theme::SUNKEN_DARK, theme::SUNKEN_LIGHT);
+        cv.fill(rect.inset(e), scheme.bg);
 
         self.draw_grid(cv, self.grid_rect(rect), term, active, scheme);
         self.draw_scrollbar(cv, &self.scrollbar_layout(rect, term));
@@ -258,12 +263,11 @@ impl Renderer {
 
     /// ペイン矩形から実際に文字グリッドを置く領域 (ベベル+余白の内側) を求める。
     pub fn grid_rect(&self, pane: Rect) -> Rect {
-        let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
-        let inset = s(1.0) + s(3.0);
+        let inset = self.px(1.0) + self.px(3.0);
         Rect {
             x: pane.x + inset,
             y: pane.y + inset,
-            w: (pane.w - 2 * inset - s(16.0)).max(0),
+            w: (pane.w - 2 * inset - self.px(16.0)).max(0),
             h: (pane.h - 2 * inset).max(0),
         }
     }
@@ -274,8 +278,7 @@ impl Renderer {
     }
 
     fn draw_scrollbar(&self, cv: &mut Canvas, bar: &ScrollbarLayout) {
-        let s = |v: f64| ((v * self.scale).round() as i32).max(1);
-        let e = s(1.0);
+        let e = self.px(1.0);
         let track = bar.track;
         cv.fill(track, theme::FRAME);
         // グレーの網掛けトラック。
@@ -291,10 +294,7 @@ impl Renderer {
             if r.w <= 0 || r.h <= 0 { return; }
             cv.fill(r, theme::BOX_FILL);
             cv.stroke(r, e, theme::BOX_BORDER);
-            cv.fill(Rect::new(r.x + e, r.y + e, r.w - 2 * e, e), theme::BEVEL_LIGHT);
-            cv.fill(Rect::new(r.x + e, r.y + e, e, r.h - 2 * e), theme::BEVEL_LIGHT);
-            cv.fill(Rect::new(r.x + e, r.bottom() - 2 * e, r.w - 2 * e, e), theme::BEVEL_DARK);
-            cv.fill(Rect::new(r.right() - 2 * e, r.y + e, e, r.h - 2 * e), theme::BEVEL_DARK);
+            cv.bevel(r.inset(e), e, theme::BEVEL_LIGHT, theme::BEVEL_DARK);
         };
         button(cv, bar.up);
         button(cv, bar.down);
@@ -302,7 +302,7 @@ impl Renderer {
         for (r, up) in [(bar.up, true), (bar.down, false)] {
             let (cx, cy) = r.center();
             for i in 0..4 {
-                let y = if up { cy - s(2.0) + i * e } else { cy + s(1.0) - i * e };
+                let y = if up { cy - self.px(2.0) + i * e } else { cy + self.px(1.0) - i * e };
                 cv.fill_clipped(Rect::new(cx - i * e, y, (2 * i + 1) * e, e), color, r);
             }
         }
@@ -310,8 +310,8 @@ impl Renderer {
             button(cv, bar.thumb);
             let (cx, cy) = bar.thumb.center();
             for i in -1..=1 {
-                cv.fill_clipped(Rect::new(cx - s(4.0), cy + i * s(3.0), s(8.0), e), theme::BEVEL_DARK, bar.thumb);
-                cv.fill_clipped(Rect::new(cx - s(4.0), cy + i * s(3.0) + e, s(8.0), e), theme::BEVEL_LIGHT, bar.thumb);
+                cv.fill_clipped(Rect::new(cx - self.px(4.0), cy + i * self.px(3.0), self.px(8.0), e), theme::BEVEL_DARK, bar.thumb);
+                cv.fill_clipped(Rect::new(cx - self.px(4.0), cy + i * self.px(3.0) + e, self.px(8.0), e), theme::BEVEL_LIGHT, bar.thumb);
             }
         }
     }
@@ -344,7 +344,7 @@ impl Renderer {
         let y = grid.y + cursor.line as i32 * ch;
         let x = grid.x + composition.start_column as i32 * cw;
         let width = composition.width as i32 * cw;
-        let edge = (self.scale.round() as i32).max(1);
+        let edge = self.px(1.0);
         cv.fill_clipped(Rect::new(x, y, width, ch), scheme.bg, grid);
         cv.fill_clipped(Rect::new(x, y + ch - edge, width, edge), scheme.fg, grid);
         if let Some((start, end)) = composition.selection {
@@ -368,8 +368,7 @@ impl Renderer {
 
     /// ペイン間のスプリッターバー。タイトルバーと同じリブ (縞) の意匠。
     pub fn draw_splitter(&self, cv: &mut Canvas, sh: &SplitterHit) {
-        let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
-        let e = s(1.0);
+        let e = self.px(1.0);
         let r = sh.rect;
 
         cv.fill(r, theme::FRAME);
@@ -381,18 +380,18 @@ impl Renderer {
                 cv.fill(Rect::new(r.right() - e, r.y, e, r.h), theme::BEVEL_DARK);
                 // 中央のリブ3本 (横線)
                 for i in -1..=1 {
-                    let y = cy + i * s(4.0);
-                    cv.fill(Rect::new(r.x + s(2.0), y, r.w - s(4.0), e), theme::STRIPE);
-                    cv.fill(Rect::new(r.x + s(2.0), y + e, r.w - s(4.0), e), theme::STRIPE_LIGHT);
+                    let y = cy + i * self.px(4.0);
+                    cv.fill(Rect::new(r.x + self.px(2.0), y, r.w - self.px(4.0), e), theme::STRIPE);
+                    cv.fill(Rect::new(r.x + self.px(2.0), y + e, r.w - self.px(4.0), e), theme::STRIPE_LIGHT);
                 }
             }
             SplitDir::Horizontal => {
                 cv.fill(Rect::new(r.x, r.y, r.w, e), theme::BEVEL_LIGHT);
                 cv.fill(Rect::new(r.x, r.bottom() - e, r.w, e), theme::BEVEL_DARK);
                 for i in -1..=1 {
-                    let x = cx + i * s(4.0);
-                    cv.fill(Rect::new(x, r.y + s(2.0), e, r.h - s(4.0)), theme::STRIPE);
-                    cv.fill(Rect::new(x + e, r.y + s(2.0), e, r.h - s(4.0)), theme::STRIPE_LIGHT);
+                    let x = cx + i * self.px(4.0);
+                    cv.fill(Rect::new(x, r.y + self.px(2.0), e, r.h - self.px(4.0)), theme::STRIPE);
+                    cv.fill(Rect::new(x + e, r.y + self.px(2.0), e, r.h - self.px(4.0)), theme::STRIPE_LIGHT);
                 }
             }
         }
@@ -405,39 +404,37 @@ impl Renderer {
         title: &str,
         focused: bool,
     ) {
-        let scale = self.scale;
-        let s = move |v: f32| ((v as f64 * scale).round() as i32).max(1);
         let tb = layout.titlebar;
 
         // タイトルバー下端の区切り線
-        cv.fill(Rect::new(tb.x, tb.bottom(), tb.w, s(1.0)), theme::SEPARATOR);
+        cv.fill(Rect::new(tb.x, tb.bottom(), tb.w, self.px(1.0)), theme::SEPARATOR);
 
         // タイトル文字列 (中央揃え)
         let title_w = self.measure_title(title);
         let title_x = tb.x + (tb.w - title_w) / 2;
         let baseline = tb.y + tb.h / 2
             + (self.title_face.ascent() / 2.0).round() as i32
-            - s(1.0);
+            - self.px(1.0);
         let color = if focused { theme::TITLE_TEXT } else { theme::TITLE_TEXT_INACTIVE };
 
         if focused {
             // 横縞 (アクティブ時のみ)。ボックスとタイトルの周囲は空ける。
-            let gap = s(6.0);
+            let gap = self.px(6.0);
             let segs = [
-                (tb.x + s(4.0), layout.close_box.x - s(4.0)),
-                (layout.close_box.right() + s(4.0), title_x - gap),
-                (title_x + title_w + gap, layout.zoom_box.x - s(4.0)),
-                (layout.collapse_box.right() + s(4.0), tb.right() - s(4.0)),
+                (tb.x + self.px(4.0), layout.close_box.x - self.px(4.0)),
+                (layout.close_box.right() + self.px(4.0), title_x - gap),
+                (title_x + title_w + gap, layout.zoom_box.x - self.px(4.0)),
+                (layout.collapse_box.right() + self.px(4.0), tb.right() - self.px(4.0)),
             ];
-            let mut y = tb.y + s(4.0);
-            while y + s(1.0) < tb.bottom() - s(3.0) {
+            let mut y = tb.y + self.px(4.0);
+            while y + self.px(1.0) < tb.bottom() - self.px(3.0) {
                 for &(x0, x1) in &segs {
                     if x1 > x0 {
-                        cv.fill(Rect::new(x0, y, x1 - x0, s(1.0)), theme::STRIPE);
-                        cv.fill(Rect::new(x0, y + s(1.0), x1 - x0, s(1.0)), theme::STRIPE_LIGHT);
+                        cv.fill(Rect::new(x0, y, x1 - x0, self.px(1.0)), theme::STRIPE);
+                        cv.fill(Rect::new(x0, y + self.px(1.0), x1 - x0, self.px(1.0)), theme::STRIPE_LIGHT);
                     }
                 }
-                y += s(2.0);
+                y += self.px(2.0);
             }
 
             self.draw_control_box(cv, layout.close_box, BoxKind::Close);
@@ -449,15 +446,11 @@ impl Renderer {
     }
 
     fn draw_control_box(&self, cv: &mut Canvas, r: Rect, kind: BoxKind) {
-        let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
-        let e = s(1.0);
+        let e = self.px(1.0);
         cv.fill(r, theme::BOX_FILL);
         cv.stroke(r, e, theme::BOX_BORDER);
         // 立体感: 内側の左上に影、右下にハイライト (押し込める見た目)
-        cv.fill(Rect::new(r.x + e, r.y + e, r.w - 2 * e, e), theme::BEVEL_DARK);
-        cv.fill(Rect::new(r.x + e, r.y + e, e, r.h - 2 * e), theme::BEVEL_DARK);
-        cv.fill(Rect::new(r.x + e, r.bottom() - 2 * e, r.w - 2 * e, e), theme::BEVEL_LIGHT);
-        cv.fill(Rect::new(r.right() - 2 * e, r.y + e, e, r.h - 2 * e), theme::BEVEL_LIGHT);
+        cv.bevel(r.inset(e), e, theme::BEVEL_DARK, theme::BEVEL_LIGHT);
 
         match kind {
             BoxKind::Close => {}
@@ -486,72 +479,69 @@ impl Renderer {
         layout: &Layout,
         selected: usize,
     ) -> Vec<Rect> {
-        let scale = self.scale;
-        let s = move |v: f32| ((v as f64 * scale).round() as i32).max(1);
         let c = layout.content;
 
         let ascent = self.title_face.ascent().round() as i32;
 
         self.draw_title_text(cv, "カラースキーマ:", c.x, c.y + ascent, theme::TITLE_TEXT);
 
-        let row_h = s(24.0);
+        let row_h = self.px(24.0);
         let mut hits = Vec::with_capacity(theme::SCHEMES.len());
         for (i, scheme) in theme::SCHEMES.iter().enumerate() {
-            let row = Rect { x: c.x, y: c.y + s(24.0) + i as i32 * row_h, w: c.w, h: row_h };
+            let row = Rect { x: c.x, y: c.y + self.px(24.0) + i as i32 * row_h, w: c.w, h: row_h };
             let cy = row.y + row.h / 2;
 
             // ラジオボタン
-            let r_out = s(6.0);
-            cv.circle(row.x + s(8.0), cy, r_out, theme::BOX_BORDER);
-            cv.circle(row.x + s(8.0), cy, r_out - s(1.0), 0xFFFFFF);
+            let r_out = self.px(6.0);
+            cv.circle(row.x + self.px(8.0), cy, r_out, theme::BOX_BORDER);
+            cv.circle(row.x + self.px(8.0), cy, r_out - self.px(1.0), 0xFFFFFF);
             if i == selected {
-                cv.circle(row.x + s(8.0), cy, s(3.0), 0x000000);
+                cv.circle(row.x + self.px(8.0), cy, self.px(3.0), 0x000000);
             }
 
             self.draw_title_text(
                 cv,
                 scheme.name,
-                row.x + s(22.0),
-                cy + ascent / 2 - s(1.0),
+                row.x + self.px(22.0),
+                cy + ascent / 2 - self.px(1.0),
                 theme::TITLE_TEXT,
             );
 
             // 右端に配色見本 (背景・文字・赤・緑・青)
-            let sw_w = s(13.0);
-            let sw_h = s(11.0);
-            let gap = s(3.0);
+            let sw_w = self.px(13.0);
+            let sw_h = self.px(11.0);
+            let gap = self.px(3.0);
             let samples = [scheme.bg, scheme.fg, scheme.ansi[1], scheme.ansi[2], scheme.ansi[4]];
-            let mut x = row.right() - s(4.0) - (sw_w + gap) * samples.len() as i32;
+            let mut x = row.right() - self.px(4.0) - (sw_w + gap) * samples.len() as i32;
             for color in samples {
                 cv.fill(Rect::new(x, cy - sw_h / 2, sw_w, sw_h), color);
-                cv.stroke(Rect::new(x, cy - sw_h / 2, sw_w, sw_h), s(1.0), theme::BOX_BORDER);
+                cv.stroke(Rect::new(x, cy - sw_h / 2, sw_w, sw_h), self.px(1.0), theme::BOX_BORDER);
                 x += sw_w + gap;
             }
 
             hits.push(row);
         }
         let row = Rect {
-            x: c.x, y: c.y + s(32.0) + theme::SCHEMES.len() as i32 * row_h,
+            x: c.x, y: c.y + self.px(32.0) + theme::SCHEMES.len() as i32 * row_h,
             w: c.w, h: row_h,
         };
         let cy = row.y + row.h / 2;
-        let checkbox = Rect { x: row.x + s(2.0), y: cy - s(6.0), w: s(12.0), h: s(12.0) };
+        let checkbox = Rect { x: row.x + self.px(2.0), y: cy - self.px(6.0), w: self.px(12.0), h: self.px(12.0) };
         cv.fill(checkbox, theme::BEVEL_LIGHT);
-        cv.stroke(checkbox, s(1.0), theme::BOX_BORDER);
+        cv.stroke(checkbox, self.px(1.0), theme::BOX_BORDER);
         if self.bitmap_text {
             // ピクセルで描くチェックマーク。
             for (dx, dy) in [(2.0, 5.0), (3.0, 6.0), (4.0, 7.0), (5.0, 6.0), (6.0, 5.0), (7.0, 4.0), (8.0, 3.0)] {
-                cv.fill(Rect::new(checkbox.x + s(dx), checkbox.y + s(dy), s(1.0), s(2.0)), theme::BOX_BORDER);
+                cv.fill(Rect::new(checkbox.x + self.px(dx), checkbox.y + self.px(dy), self.px(1.0), self.px(2.0)), theme::BOX_BORDER);
             }
         }
-        self.draw_title_text(cv, "ビットマップ風の文字", row.x + s(22.0), cy + ascent / 2 - s(1.0), theme::TITLE_TEXT);
+        self.draw_title_text(cv, "ビットマップ風の文字", row.x + self.px(22.0), cy + ascent / 2 - self.px(1.0), theme::TITLE_TEXT);
         hits.push(row);
         hits
     }
 
     pub fn draw_grow_box(&self, cv: &mut Canvas, r: Rect) {
-        let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
-        let e = s(1.0);
+        let e = self.px(1.0);
         cv.fill(r, theme::BOX_FILL);
         cv.stroke(r, e, theme::BOX_BORDER);
         // 重なった2つの四角のアイコン
@@ -628,18 +618,17 @@ impl Renderer {
         let x = clip.x + col * cw;
         let y = clip.y + row * ch;
         let cursor_color = resolve_named(colors, NamedColor::Cursor, scheme.cursor);
-        let s = |v: f32| ((v as f64 * self.scale).round() as i32).max(1);
 
         if !active {
-            cv.stroke(Rect::new(x, y, cw, ch), s(1.0), cursor_color);
+            cv.stroke(Rect::new(x, y, cw, ch), self.px(1.0), cursor_color);
             return;
         }
         match cursor.shape {
             CursorShape::Beam => {
-                cv.fill_clipped(Rect::new(x, y, s(2.0), ch), cursor_color, clip);
+                cv.fill_clipped(Rect::new(x, y, self.px(2.0), ch), cursor_color, clip);
             }
             CursorShape::Underline => {
-                cv.fill_clipped(Rect::new(x, y + ch - s(2.0), cw, s(2.0)), cursor_color, clip);
+                cv.fill_clipped(Rect::new(x, y + ch - self.px(2.0), cw, self.px(2.0)), cursor_color, clip);
             }
             _ => {
                 // ブロックカーソル: セルを反転
@@ -799,6 +788,14 @@ impl<'a> Canvas<'a> {
                 self.buf[(y * self.w + x) as usize] ^= 0x00FF_FFFF;
             }
         }
+    }
+
+    /// 幅 `e` の縁を描く。上と左が `top_left`、下と右が `bottom_right`。
+    fn bevel(&mut self, r: Rect, e: i32, top_left: u32, bottom_right: u32) {
+        self.fill(Rect::new(r.x, r.y, r.w, e), top_left);
+        self.fill(Rect::new(r.x, r.y, e, r.h), top_left);
+        self.fill(Rect::new(r.x, r.bottom() - e, r.w, e), bottom_right);
+        self.fill(Rect::new(r.right() - e, r.y, e, r.h), bottom_right);
     }
 
     fn circle(&mut self, cx: i32, cy: i32, r: i32, color: u32) {
